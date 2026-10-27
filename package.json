@@ -1,0 +1,52 @@
+{
+  "name": "crest",
+  "productName": "Crest",
+  "version": "1.0.0",
+  "description": "A minimal audio and video player with a waveform you can select and drag straight into your DAW.",
+  "main": "main.js",
+  "author": "Crest",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "test": "node tests/test.js",
+    "icons": "node scripts/make-icons.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.crest.player",
+    "productName": "Crest",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        { "target": "dmg", "arch": ["universal"] }
+      ]
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    }
+  }
+}

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crest</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="empty">
+  <header class="topbar"><span id="title">Crest</span></header>
+
+  <main>
+    <section id="stage"><video id="media" playsinline preload="auto"></video></section>
+
+    <section id="wavePanel">
+      <div id="wave">
+        <canvas id="canvas"></canvas>
+        <div id="playhead"></div>
+        <div id="selection" draggable="true">
+          <span class="handle l" data-side="l"></span>
+          <span class="handle r" data-side="r"></span>
+          <span id="selLabel">Drag to your DAW</span>
+        </div>
+        <div id="status" role="status"></div>
+      </div>
+    </section>
+
+    <section id="empty">
+      <svg class="empty-icon" viewBox="0 0 64 32" aria-hidden="true">
+        <g fill="currentColor">
+          <rect x="2" y="12" width="4" height="8" rx="2"/><rect x="10" y="6" width="4" height="20" rx="2"/>
+          <rect x="18" y="10" width="4" height="12" rx="2"/><rect x="26" y="2" width="4" height="28" rx="2"/>
+          <rect x="34" y="8" width="4" height="16" rx="2"/><rect x="42" y="4" width="4" height="24" rx="2"/>
+          <rect x="50" y="11" width="4" height="10" rx="2"/><rect x="58" y="14" width="4" height="4" rx="2"/>
+        </g>
+      </svg>
+      <h1>Drop an audio or video file</h1>
+      <button class="btn primary" id="openBig">Open file&hellip;</button>
+      <p class="hint">Select part of the waveform, then drag it into your DAW or a folder.</p>
+    </section>
+  </main>
+
+  <footer class="bar">
+    <button class="play" id="play" title="Play / pause (Space)" aria-label="Play / pause">
+      <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>
+      <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+    </button>
+
+    <div class="time"><span id="cur">0:00.000</span><span class="sep">/</span><span id="dur">0:00.000</span></div>
+
+    <button class="btn" id="loudest" title="Jump to the loudest part. Press again for the next loudest (P)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2.5-7 4 14 3-9 1.5 2h5"/></svg>
+      <span class="lbl">Loudest</span>
+    </button>
+
+    <button class="btn" id="loop" title="Loop (L)" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>
+      <span class="lbl">Loop</span>
+    </button>
+
+    <label class="vol" title="Volume">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="vol" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+    </label>
+
+    <div class="spacer"></div>
+
+    <div id="selInfo" hidden></div>
+
+    <div class="grip" id="grip" draggable="true" title="Drag the selection (or the whole file) into your DAW or a folder">
+      <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
+      <span id="gripText">Drag file</span>
+    </div>
+
+    <button class="btn" id="open" title="Open file (Ctrl/Cmd+O)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span class="lbl">Open</span>
+    </button>
+  </footer>
+
+  <script src="audio-utils.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
