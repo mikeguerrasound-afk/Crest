@@ -1,12 +1,34 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  // files and folders
   openDialog: () => ipcRenderer.invoke('dialog:open'),
-  readFile: (p) => ipcRenderer.invoke('file:read', p),
+  openFolderDialog: () => ipcRenderer.invoke('dialog:open-folder'),
+  resolve: (p, opts) => ipcRenderer.invoke('file:resolve', p, opts),
   pathForFile: (file) => webUtils.getPathForFile(file),
-  onFileOpened: (cb) => ipcRenderer.on('file:opened', (_e, info) => cb(info)),
-  onMenuExport: (cb) => ipcRenderer.on('menu:export', () => cb()),
+  onResolved: (cb) => ipcRenderer.on('file:resolved', (_e, r) => cb(r)),
+  onMenu: (cb) => ipcRenderer.on('menu:action', (_e, name) => cb(name)),
+
+  // ffmpeg-backed media
+  extractAudio: (p) => ipcRenderer.invoke('media:extract', p),
+  prepareProxy: (p, plan) => ipcRenderer.invoke('media:proxy', p, plan),
+  renderClip: (p, start, end) => ipcRenderer.invoke('media:clip', p, start, end),
+  cancelJob: (kind) => ipcRenderer.send('job:cancel', kind),
+  onProgress: (cb) => ipcRenderer.on('job:progress', (_e, d) => cb(d)),
+
+  // exports and drag-out
   writeExportSync: (name, bytes) => ipcRenderer.sendSync('export:write-sync', name, bytes),
+  copyExportSync: (src, name) => ipcRenderer.sendSync('export:copy-sync', src, name),
+  chooseExportDir: () => ipcRenderer.invoke('export:choose-dir'),
+  writeTo: (dir, name, bytes) => ipcRenderer.invoke('export:write-to', dir, name, bytes),
   saveAs: (name, bytes) => ipcRenderer.invoke('export:save-as', name, bytes),
+  reveal: (p) => ipcRenderer.send('export:reveal', p),
+  openExportsDir: () => ipcRenderer.send('export:open-dir'),
   startDrag: (filePath) => ipcRenderer.send('drag:start', filePath),
+
+  // app
+  setLang: (l) => ipcRenderer.send('lang:set', l),
+  getLang: () => ipcRenderer.invoke('lang:get'),
+  askDefault: () => ipcRenderer.send('default:ask'),
+  appInfo: () => ipcRenderer.invoke('app:info'),
 });

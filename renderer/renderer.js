@@ -2,161 +2,317 @@
   'use strict';
 
   const A = window.CrestAudio;
+  const EQ = window.CrestEQ;
+  const I = window.CrestI18n;
   const api = window.api;
+  const t = (k, v) => I.t(k, v);
   const $ = (id) => document.getElementById(id);
 
   const el = {
-    media: $('media'),
-    wave: $('wave'),
-    canvas: $('canvas'),
-    playhead: $('playhead'),
-    selection: $('selection'),
-    status: $('status'),
-    title: $('title'),
-    play: $('play'),
-    cur: $('cur'),
-    dur: $('dur'),
-    loudest: $('loudest'),
-    loop: $('loop'),
-    vol: $('vol'),
-    selInfo: $('selInfo'),
-    grip: $('grip'),
-    gripText: $('gripText'),
-    open: $('open'),
-    openBig: $('openBig'),
+    media: $('media'), stage: $('stage'), stageMsg: $('stageMsg'), splitter: $('splitter'),
+    wave: $('wave'), canvas: $('canvas'), playhead: $('playhead'), selection: $('selection'),
+    status: $('status'), meter: $('meter'), fx: $('fx'), title: $('title'),
+    play: $('play'), timeBtn: $('timeBtn'), cur: $('cur'), dur: $('dur'),
+    loudest: $('loudest'), prevHit: $('prevHit'), nextHit: $('nextHit'), loop: $('loop'), vol: $('vol'),
+    grip: $('grip'), gripText: $('gripText'), gripVideo: $('gripVideo'), gripVideoText: $('gripVideoText'),
+    folderBtn: $('folderBtn'), open: $('open'), specBtn: $('specBtn'), eqBtn: $('eqBtn'), optsBtn: $('optsBtn'),
+    openBig: $('openBig'), openFolderBig: $('openFolderBig'),
+    side: $('side'), filter: $('filter'), folderName: $('folderName'), list: $('list'), listSpacer: $('listSpacer'),
+    listRows: $('listRows'), listEmpty: $('listEmpty'),
+    eqPanel: $('eqPanel'), eqCanvas: $('eqCanvas'), eqParams: $('eqParams'), eqBypass: $('eqBypass'), eqReset: $('eqReset'),
+    eqOut: $('eqOut'), eqOutVal: $('eqOutVal'),
+    opts: $('opts'), st: $('st'), stOut: $('stOut'), stReset: $('stReset'), sens: $('sens'), sensOut: $('sensOut'),
+    snap: $('snap'), fade: $('fade'), applyFx: $('applyFx'), nameOrig: $('nameOrig'), nameUcs: $('nameUcs'),
+    ucsFields: $('ucsFields'), ucsCat: $('ucsCat'), ucsFx: $('ucsFx'), ucsCreator: $('ucsCreator'), ucsSource: $('ucsSource'),
+    ucsPreview: $('ucsPreview'), langSeg: $('langSeg'), setDefault: $('setDefault'), openExports: $('openExports'),
   };
   const g = el.canvas.getContext('2d');
 
-  const rootStyle = getComputedStyle(document.documentElement);
-  const COLOR = {
-    wave: rootStyle.getPropertyValue('--wave').trim(),
-    grid: rootStyle.getPropertyValue('--grid').trim(),
-    muted: rootStyle.getPropertyValue('--muted').trim(),
-    accent: rootStyle.getPropertyValue('--accent').trim(),
-  };
-  const FONT = getComputedStyle(document.body).fontFamily;
   const RULER_H = 24;
+  const MAX_SAMPLES = 260e6; // ~1 GB of float32 once decoded
+  const MAX_BYTES = 400 * 1024 * 1024;
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  /* ---------- preferences (per-viewer, best effort) ---------- */
+
+  const DEF = {
+    st: 0, sens: 10, snap: true, fade: 2, applyFx: true, naming: 'orig',
+    ucs: { catId: '', fxName: '', creatorId: '', sourceId: '' },
+    eq: null, vol: 1, sidebar: false, spec: false, tc: false, waveH: 210, eqOpen: false, lang: null,
+  };
+  let prefs = Object.assign({}, DEF, { ucs: Object.assign({}, DEF.ucs) });
+  try {
+    const saved = JSON.parse(localStorage.getItem('crest.prefs.v2') || 'null');
+    if (saved && typeof saved === 'object') {
+      prefs = Object.assign(prefs, saved, { ucs: Object.assign({}, DEF.ucs, saved.ucs || {}) });
+    }
+  } catch {}
+  let saveTimer = null;
+  function savePrefs() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try {
+        localStorage.setItem('crest.prefs.v2', JSON.stringify(prefs));
+      } catch {}
+    }, 150);
+  }
+
+  /* ---------- app state ---------- */
 
   const S = {
-    file: null, // { path, name }
-    audio: null, // { channels, sampleRate, length, duration } once decoded
-    pyr: null,
-    peaks: [],
-    peakIdx: -1,
-    view: { start: 0, end: 1 },
-    sel: null, // { start, end } in seconds
-    loop: false,
-    playing: false,
-    loadId: 0,
-    endTimer: null,
+    info: null, file: null, audio: null, pyr: null, peaks: [], peakIdx: -1, hits: [], hitSel: -1,
+    view: { start: 0, end: 1 }, sel: null, loop: false, playing: false, loadId: 0, endTimer: null,
+    fps: null, extract: null, triedFallback: false, meterAll: null, prepared: null, clip: null,
+    folder: { dir: '', files: [], shown: [] },
   };
 
-  /* ---------- small helpers ---------- */
+  const eqState = EQ.sanitize(prefs.eq);
 
-  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  /* ---------- helpers ---------- */
+
   const duration = () => (S.audio ? S.audio.duration : isFinite(el.media.duration) ? el.media.duration : 0);
   const W = () => el.wave.clientWidth;
   const H = () => el.wave.clientHeight;
-  const t2x = (t) => ((t - S.view.start) / (S.view.end - S.view.start)) * W();
+  const t2x = (tm) => ((tm - S.view.start) / (S.view.end - S.view.start)) * W();
   const x2t = (x) => S.view.start + (x / W()) * (S.view.end - S.view.start);
-
-  function fmtTime(t, decimals = 3) {
-    if (!isFinite(t) || t < 0) t = 0;
-    const totalMs = Math.round(t * 1000);
-    const ms = totalMs % 1000;
-    const s = Math.floor(totalMs / 1000) % 60;
-    const m = Math.floor(totalMs / 60000) % 60;
-    const h = Math.floor(totalMs / 3600000);
-    const frac = decimals ? '.' + String(ms).padStart(3, '0').slice(0, decimals) : '';
-    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s).padStart(2, '0') + frac;
-  }
-
-  // 1m23s450 — safe in file names on every OS
-  function stamp(t) {
-    const ms = Math.round(t * 1000);
-    return Math.floor(ms / 60000) + 'm' + String(Math.floor(ms / 1000) % 60).padStart(2, '0') + 's' + String(ms % 1000).padStart(3, '0');
-  }
+  const fmtT = (tm, d) => (prefs.tc && S.info && S.info.kind === 'video' ? A.fmtTimecode(tm, S.fps || 30) : A.fmtTime(tm, d));
+  const fmtDb = (v) => (isFinite(v) ? v.toFixed(1) : '−∞');
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const baseName = (n) => String(n).replace(/\.[^.]+$/, '');
+  const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
+  const lastPart = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
 
   let toastTimer = null;
   function toast(msg, ms = 2200) {
     clearTimeout(toastTimer);
-    if (!msg) {
-      el.status.classList.remove('show');
-      return;
-    }
+    if (!msg) return el.status.classList.remove('show');
     el.status.textContent = msg;
     el.status.classList.add('show');
     if (ms) toastTimer = setTimeout(() => el.status.classList.remove('show'), ms);
   }
 
-  function toArrayBuffer(u8) {
-    if (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength) return u8.buffer;
-    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  function stageMsg(msg) {
+    el.stageMsg.textContent = msg || '';
+    el.stageMsg.classList.toggle('show', !!msg);
+  }
+
+  /* ---------- audio graph: media -> EQ -> volume -> analyser -> speakers ---------- */
+
+  const G = { ctx: null, src: null, chain: null, vol: null, analyser: null };
+
+  function ensureGraph() {
+    if (G.ctx) return;
+    try {
+      G.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      G.src = G.ctx.createMediaElementSource(el.media);
+      G.vol = G.ctx.createGain();
+      G.analyser = G.ctx.createAnalyser();
+      G.analyser.fftSize = 4096;
+      G.analyser.smoothingTimeConstant = 0.82;
+      G.analyser.minDecibels = -110;
+      G.analyser.maxDecibels = 0;
+      rebuildChain();
+      applyVolume();
+    } catch (err) {
+      console.error('audio graph failed', err);
+      G.ctx = null;
+    }
+  }
+
+  function rebuildChain() {
+    if (!G.ctx) return;
+    try {
+      G.src.disconnect();
+      if (G.chain) G.chain.out.disconnect();
+      G.vol.disconnect();
+      G.analyser.disconnect();
+    } catch {}
+    G.chain = EQ.buildChain(G.ctx, G.src, eqState);
+    G.chain.out.connect(G.vol);
+    G.vol.connect(G.analyser);
+    G.analyser.connect(G.ctx.destination);
+  }
+
+  function applyVolume() {
+    const v = clamp(prefs.vol, 0, 1);
+    if (G.ctx) {
+      el.media.volume = 1;
+      G.vol.gain.setTargetAtTime(v * v, G.ctx.currentTime, 0.01);
+    } else el.media.volume = v;
+  }
+
+  function applyRate() {
+    const r = A.semitoneRate(prefs.st);
+    el.media.preservesPitch = false;
+    el.media.defaultPlaybackRate = r;
+    el.media.playbackRate = r;
   }
 
   /* ---------- loading ---------- */
 
   async function decodeAudio(ab, preferredRate) {
-    const rates = preferredRate ? [preferredRate, 48000] : [48000];
-    for (const rate of rates) {
-      let ctx;
+    const rates = [];
+    if (preferredRate && preferredRate >= 3000 && preferredRate <= 768000) rates.push(preferredRate);
+    if (!rates.includes(48000)) rates.push(48000);
+    let lastErr;
+    for (let i = 0; i < rates.length; i++) {
       try {
-        ctx = new OfflineAudioContext(1, 1, rate);
-      } catch {
-        continue; // rate not supported here, try the next
+        const ctx = new OfflineAudioContext(1, 1, rates[i]);
+        return await ctx.decodeAudioData(i < rates.length - 1 ? ab.slice(0) : ab);
+      } catch (e) {
+        lastErr = e;
       }
-      return ctx.decodeAudioData(ab);
     }
-    throw new Error('No audio context available');
+    throw lastErr;
   }
 
-  async function loadFile(info) {
-    if (!info) return;
-    const id = ++S.loadId;
-
+  function teardown() {
     el.media.pause();
     clearTimeout(S.endTimer);
     S.endTimer = null;
-    Object.assign(S, { file: { path: info.path, name: info.name }, audio: null, pyr: null, peaks: [], peakIdx: -1, sel: null });
+    api.cancelJob('proxy');
+    api.cancelJob('extract');
+    api.cancelJob('clip');
+    clearTimeout(prepTimer);
+    clearTimeout(clipTimer);
+    prepSeq++;
+    clipSeq++;
+  }
 
-    document.body.classList.remove('empty', 'has-video');
+  async function handleResolved(r, opts) {
+    if (!r) return;
+    if (r.type === 'folder') {
+      setFolder(r.dir, r.files);
+      setSidebar(true);
+      return;
+    }
+    if (r.listed !== false && r.files) setFolder(r.dir, r.files);
+    await loadFile(r.info, opts);
+  }
+
+  async function loadFile(info, opts) {
+    opts = opts || {};
+    const id = ++S.loadId;
+    teardown();
+    Object.assign(S, {
+      info, file: { path: info.path, name: info.name }, audio: null, pyr: null, peaks: [], peakIdx: -1, hits: [], hitSel: -1,
+      sel: null, meterAll: null, prepared: null, clip: null, triedFallback: false, extract: null, ready: false,
+      fps: (info.probe && info.probe.video && info.probe.video.fps) || null,
+    });
+    el.media.removeAttribute('src'); // drop the previous picture right away
+    el.media.load();
+    document.body.classList.remove('empty');
     document.body.classList.add('loaded');
+    document.body.classList.toggle('has-video', info.kind === 'video');
     el.title.textContent = info.name;
     document.title = info.name + ' — Crest';
-    el.dur.textContent = '0:00.000';
-    el.media.src = info.url;
-    el.media.load();
+    el.dur.textContent = fmtT((info.probe && info.probe.duration) || 0);
+    el.meter.textContent = '';
+    stageMsg('');
     updateSelInfo();
     applyLoop();
     layoutOverlays();
     requestDraw();
+    renderRows();
+    scrollToActive();
+    toast('');
 
-    if (info.tooLarge || !info.bytes) {
-      toast('This file is too large to draw a waveform — playback only.', 5000);
+    let extractP = null;
+    S.extract = () => (extractP = extractP || api.extractAudio(info.path));
+
+    startPlayback(id, info, opts);
+    startWaveform(id, info);
+  }
+
+  async function startPlayback(id, info, opts) {
+    let url = info.url;
+    try {
+      if (info.plan === 'extract') url = (await S.extract()).url;
+      else if (info.kind === 'video' && (info.plan === 'transcode' || info.plan === 'audio-fix')) {
+        stageMsg(t('previewPrep', { pct: 0 }));
+        url = (await api.prepareProxy(info.path, info.plan)).url;
+      }
+    } catch (err) {
+      if (id !== S.loadId) return;
+      stageMsg('');
+      toast(t(/ffmpeg-missing/.test(String(err && err.message)) ? 'noFfmpeg' : 'previewFail'), 6000);
       return;
     }
+    if (id !== S.loadId) return;
+    stageMsg('');
+    el.media.src = url;
+    applyRate();
+    el.media.load();
+    if (opts && opts.autoplay) {
+      el.media.addEventListener(
+        'canplay',
+        () => {
+          if (id === S.loadId) togglePlay(true);
+        },
+        { once: true }
+      );
+    }
+  }
 
-    toast('Reading waveform…', 0);
+  async function startWaveform(id, info) {
+    const pa = info.probe && info.probe.audio;
+    if (info.probe && !pa) {
+      toast(t('noAudio'), 4000);
+      return;
+    }
+    const sr0 = (pa && pa.sampleRate) || 48000;
+    const ch0 = (pa && pa.channels) || 2;
+    const dur = info.probe && info.probe.duration;
+    if ((dur && dur * sr0 * ch0 > MAX_SAMPLES) || (!dur && info.size > MAX_BYTES * 2)) {
+      toast(t('tooLarge'), 6000);
+      return;
+    }
+    toast(t('reading'), 0);
     try {
-      const ab = toArrayBuffer(info.bytes);
-      const wav = A.sniffWavInfo(ab);
-      const buf = await decodeAudio(ab, wav && wav.sampleRate);
+      const useExtract = info.kind === 'video' || info.plan === 'extract' || info.size > MAX_BYTES;
+      let buf = null;
+      if (!useExtract) {
+        try {
+          const ab = await (await fetch(info.url)).arrayBuffer();
+          if (id !== S.loadId) return;
+          const wav = A.sniffWavInfo(ab);
+          buf = await decodeAudio(ab, (wav && wav.sampleRate) || (pa && pa.sampleRate));
+        } catch (e) {
+          if (id !== S.loadId) return;
+          buf = null; // fall through to the ffmpeg route
+        }
+      }
+      if (!buf) {
+        const x = await S.extract();
+        if (id !== S.loadId) return;
+        const ab = await (await fetch(x.url)).arrayBuffer();
+        if (id !== S.loadId) return;
+        const wav = A.sniffWavInfo(ab);
+        buf = await decodeAudio(ab, wav && wav.sampleRate);
+      }
       if (id !== S.loadId) return;
 
       const channels = [];
       for (let i = 0; i < buf.numberOfChannels; i++) channels.push(buf.getChannelData(i));
       S.audio = { channels, sampleRate: buf.sampleRate, length: buf.length, duration: buf.duration };
       S.pyr = A.buildPyramid(channels, 256);
+      await tick();
+      if (id !== S.loadId) return;
       S.peaks = A.findPeaks(channels, buf.sampleRate, 8, 0.3);
-
-      el.dur.textContent = fmtTime(buf.duration);
+      await tick();
+      if (id !== S.loadId) return;
+      S.hits = A.detectHits(channels, buf.sampleRate, { riseDb: prefs.sens });
+      el.dur.textContent = fmtT(buf.duration);
       fitView();
       toast('');
+      S.ready = true;
+      updateMeter();
     } catch (err) {
       if (id !== S.loadId) return;
       console.error(err);
       S.audio = null;
-      toast('Couldn’t draw this file’s waveform — you can still play it.', 5000);
+      toast(t('noDraw'), 5000);
     }
     requestDraw();
   }
@@ -173,15 +329,12 @@
     requestDraw();
     layoutOverlays();
   }
-
   const fitView = () => setView(0, duration());
-
-  function ensureVisible(t) {
-    if (t >= S.view.start && t <= S.view.end) return;
+  function ensureVisible(tm) {
+    if (tm >= S.view.start && tm <= S.view.end) return;
     const span = S.view.end - S.view.start;
-    setView(t - span / 2, t + span / 2);
+    setView(tm - span / 2, tm + span / 2);
   }
-
   function zoomToSelection() {
     if (!S.sel) return fitView();
     const pad = (S.sel.end - S.sel.start) * 0.06;
@@ -189,6 +342,15 @@
   }
 
   /* ---------- drawing ---------- */
+
+  const css = getComputedStyle(document.documentElement);
+  const COLOR = {
+    wave: css.getPropertyValue('--wave').trim(),
+    grid: css.getPropertyValue('--grid').trim(),
+    muted: css.getPropertyValue('--muted').trim(),
+    accent: css.getPropertyValue('--accent').trim(),
+  };
+  const FONT = getComputedStyle(document.body).fontFamily;
 
   let drawQueued = false;
   function requestDraw() {
@@ -208,20 +370,132 @@
     const steps = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
     const step = steps.find((s) => s >= raw) || 3600;
     const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
-
     g.font = `${10 * dpr}px ${FONT}`;
     g.textBaseline = 'top';
+    g.textAlign = 'left';
     g.fillStyle = COLOR.grid;
     g.fillRect(0, Math.round(RULER_H * dpr) - 1, w, 1);
-
     for (let k = Math.ceil(S.view.start / step); k * step <= S.view.end; k++) {
-      const t = k * step;
-      const x = Math.round(t2x(t) * dpr);
+      const tm = k * step;
+      const x = Math.round(t2x(tm) * dpr);
       g.fillStyle = COLOR.grid;
       g.fillRect(x, Math.round((RULER_H - 7) * dpr), Math.max(1, Math.round(dpr)), Math.round(7 * dpr));
       g.fillStyle = COLOR.muted;
-      g.fillText(fmtTime(t, decimals), x + 4 * dpr, 6 * dpr);
+      g.fillText(A.fmtTime(tm, decimals), x + 4 * dpr, 6 * dpr);
     }
+  }
+
+  function drawWave(dpr, w, h) {
+    const chans = S.audio.channels;
+    const lanes = chans.length <= 2 ? chans.length : 1;
+    const top = (RULER_H + 6) * dpr;
+    const bottom = h - 8 * dpr;
+    const laneH = (bottom - top) / lanes;
+    const sr = S.audio.sampleRate;
+    const s0 = S.view.start * sr;
+    const s1 = S.view.end * sr;
+    const line = Math.max(1, Math.round(dpr));
+    for (let lane = 0; lane < lanes; lane++) {
+      const mid = top + laneH * (lane + 0.5);
+      const amp = laneH * 0.5 * 0.96;
+      const list = chans.length <= 2 ? [lane] : chans.map((_, i) => i);
+      g.fillStyle = COLOR.grid;
+      g.fillRect(0, Math.round(mid), w, line);
+      const cols = A.columns(chans, S.pyr, list, s0, s1, w);
+      g.fillStyle = COLOR.wave;
+      for (let x = 0; x < w; x++) {
+        const mx = cols.max[x];
+        const mn = cols.min[x];
+        if (mx < mn) continue;
+        const y0 = mid - mx * amp;
+        const y1 = mid - mn * amp;
+        g.fillRect(x, y0, 1, Math.max(line, y1 - y0));
+      }
+    }
+  }
+
+  // inferno-like colour ramp
+  const LUT = (() => {
+    const stops = [[0, [0, 0, 4]], [0.2, [40, 11, 84]], [0.42, [120, 28, 109]], [0.62, [188, 55, 84]], [0.8, [237, 105, 37]], [0.92, [251, 180, 26]], [1, [252, 255, 164]]];
+    const out = new Uint8ClampedArray(256 * 3);
+    for (let i = 0; i < 256; i++) {
+      const v = i / 255;
+      let k = 0;
+      while (k < stops.length - 2 && v > stops[k + 1][0]) k++;
+      const [a, ca] = stops[k];
+      const [b, cb] = stops[k + 1];
+      const f = clamp((v - a) / (b - a), 0, 1);
+      for (let c = 0; c < 3; c++) out[i * 3 + c] = ca[c] + (cb[c] - ca[c]) * f;
+    }
+    return out;
+  })();
+  const specCanvas = document.createElement('canvas');
+  let specKey = '';
+
+  function drawSpectrogram(dpr, w) {
+    const top = RULER_H + 6;
+    const hh = Math.max(8, H() - top - 4);
+    const cols = Math.max(1, Math.round(W() / 2));
+    const rows = Math.max(1, Math.round(hh / 2));
+    const sr = S.audio.sampleRate;
+    const s0 = S.view.start * sr;
+    const s1 = S.view.end * sr;
+    const maxHz = Math.min(20000, sr / 2);
+    const key = [S.loadId, Math.round(s0), Math.round(s1), cols, rows].join();
+    if (key !== specKey) {
+      const data = A.spectrogram(S.audio.channels, sr, s0, s1, cols, rows, { fftSize: cols <= 700 ? 2048 : 1024, maxHz });
+      specCanvas.width = cols;
+      specCanvas.height = rows;
+      const sctx = specCanvas.getContext('2d');
+      const img = sctx.createImageData(cols, rows);
+      for (let i = 0; i < data.length; i++) {
+        const v = data[i] * 3;
+        img.data[i * 4] = LUT[v];
+        img.data[i * 4 + 1] = LUT[v + 1];
+        img.data[i * 4 + 2] = LUT[v + 2];
+        img.data[i * 4 + 3] = 255;
+      }
+      sctx.putImageData(img, 0, 0);
+      specKey = key;
+    }
+    g.imageSmoothingEnabled = true;
+    g.drawImage(specCanvas, 0, top * dpr, w, hh * dpr);
+    g.font = `${10 * dpr}px ${FONT}`;
+    g.textBaseline = 'middle';
+    g.textAlign = 'left';
+    for (const [f, label] of [[100, '100'], [1000, '1k'], [10000, '10k']]) {
+      if (f >= maxHz) continue;
+      const r = (rows * Math.log(f / maxHz)) / Math.log(30 / maxHz);
+      const y = (top + (r / rows) * hh) * dpr;
+      g.fillStyle = 'rgba(255,255,255,.22)';
+      g.fillRect(0, Math.round(y), 8 * dpr, Math.max(1, Math.round(dpr)));
+      g.fillStyle = 'rgba(255,255,255,.75)';
+      g.fillText(label + ' Hz', 12 * dpr, y);
+    }
+  }
+
+  function drawHitMarks(dpr) {
+    if (!S.hits.length) return;
+    const sr = S.audio.sampleRate;
+    const y0 = (RULER_H + 1) * dpr;
+    const sz = 5 * dpr;
+    g.fillStyle = COLOR.accent;
+    g.globalAlpha = 0.85;
+    let lastX = -1e9;
+    for (const h of S.hits) {
+      const tm = h.start / sr;
+      if (tm < S.view.start || tm > S.view.end) continue;
+      const x = t2x(tm) * dpr;
+      if (x - lastX < 3 * dpr) continue;
+      lastX = x;
+      g.beginPath();
+      g.moveTo(x - sz, y0);
+      g.lineTo(x + sz, y0);
+      g.lineTo(x, y0 + sz * 1.4);
+      g.closePath();
+      g.fill();
+    }
+    g.globalAlpha = 1;
   }
 
   function draw() {
@@ -235,56 +509,26 @@
     g.clearRect(0, 0, w, h);
     drawRuler(dpr, w);
     if (!S.audio) return;
-
-    const chans = S.audio.channels;
-    const lanes = chans.length <= 2 ? chans.length : 1;
-    const top = (RULER_H + 6) * dpr;
-    const bottom = h - 8 * dpr;
-    const laneH = (bottom - top) / lanes;
-    const sr = S.audio.sampleRate;
-    const s0 = S.view.start * sr;
-    const s1 = S.view.end * sr;
-    const line = Math.max(1, Math.round(dpr));
-
-    for (let lane = 0; lane < lanes; lane++) {
-      const mid = top + laneH * (lane + 0.5);
-      const amp = laneH * 0.5 * 0.96;
-      const list = chans.length <= 2 ? [lane] : chans.map((_, i) => i);
-
-      g.fillStyle = COLOR.grid;
-      g.fillRect(0, Math.round(mid), w, line);
-
-      const cols = A.columns(chans, S.pyr, list, s0, s1, w);
-      g.fillStyle = COLOR.wave;
-      for (let x = 0; x < w; x++) {
-        const mx = cols.max[x];
-        const mn = cols.min[x];
-        if (mx < mn) continue;
-        const y0 = mid - mx * amp;
-        const y1 = mid - mn * amp;
-        g.fillRect(x, y0, 1, Math.max(line, y1 - y0));
-      }
-    }
-
-    // marker for the loudest-part target
+    if (prefs.spec) drawSpectrogram(dpr, w);
+    else drawWave(dpr, w, h);
+    drawHitMarks(dpr);
     if (S.peakIdx >= 0 && S.peaks[S.peakIdx]) {
-      const t = S.peaks[S.peakIdx].sample / sr;
-      const x = Math.round(t2x(t) * dpr);
+      const x = Math.round(t2x(S.peaks[S.peakIdx].sample / S.audio.sampleRate) * dpr);
       if (x >= 0 && x <= w) {
         g.fillStyle = COLOR.accent;
         g.globalAlpha = 0.35;
-        g.fillRect(x, Math.round(RULER_H * dpr), line, h);
+        g.fillRect(x, Math.round(RULER_H * dpr), Math.max(1, Math.round(dpr)), h);
         g.globalAlpha = 1;
       }
     }
   }
 
   function updatePlayhead() {
-    const t = el.media.currentTime || 0;
-    const x = t2x(t);
+    const tm = el.media.currentTime || 0;
+    const x = t2x(tm);
     el.playhead.style.display = x < -1 || x > W() + 1 ? 'none' : 'block';
     el.playhead.style.transform = `translateX(${Math.round(x)}px)`;
-    el.cur.textContent = fmtTime(t);
+    el.cur.textContent = fmtT(tm);
   }
 
   function layoutOverlays() {
@@ -307,64 +551,92 @@
     layoutOverlays();
   }).observe(el.wave);
 
+  /* ---------- meter and processing chip ---------- */
+
+  let meterTimer = null;
+  function renderMeter(r) {
+    el.meter.innerHTML = `<b>${t('mPeak')}</b> ${fmtDb(r.peakDb)} &nbsp;<b>${t('mRms')}</b> ${fmtDb(r.rmsDb)} &nbsp;<b>${t('mLufs')}</b> ${fmtDb(r.lufs)}`;
+    S.lastMeter = r;
+  }
+  function updateMeter() {
+    clearTimeout(meterTimer);
+    if (!S.audio) {
+      el.meter.textContent = '';
+      return;
+    }
+    meterTimer = setTimeout(() => {
+      if (!S.audio) return;
+      const sr = S.audio.sampleRate;
+      let r;
+      if (S.sel) r = A.loudness(S.audio.channels, sr, Math.round(S.sel.start * sr), Math.round(S.sel.end * sr));
+      else r = S.meterAll || (S.meterAll = A.loudness(S.audio.channels, sr, 0, S.audio.length));
+      renderMeter(r);
+    }, S.sel ? 120 : 0);
+  }
+
+  const processingActive = () => prefs.applyFx && (prefs.st !== 0 || EQ.isActive(eqState));
+  function updateFx() {
+    const parts = [];
+    if (EQ.isActive(eqState)) parts.push('EQ');
+    if (prefs.st !== 0) parts.push((prefs.st > 0 ? '+' : '−') + Math.abs(prefs.st).toFixed(1) + ' st');
+    let s = parts.join(' · ');
+    if (s && !prefs.applyFx) s += ` (${t('fxNotExported')})`;
+    el.fx.textContent = s;
+  }
+
   /* ---------- selection ---------- */
 
   function updateSelInfo() {
-    if (S.sel) {
-      const d = S.sel.end - S.sel.start;
-      el.selInfo.textContent = `${fmtTime(S.sel.start)} – ${fmtTime(S.sel.end)}  ·  ${fmtTime(d)}`;
-      el.selInfo.hidden = false;
-      el.gripText.textContent = 'Drag selection';
-      el.grip.classList.add('hot');
-    } else {
-      el.selInfo.hidden = true;
-      el.gripText.textContent = 'Drag file';
-      el.grip.classList.remove('hot');
-    }
+    el.gripText.textContent = S.sel ? t('gripSel') : t('gripFile');
+    el.grip.classList.toggle('hot', !!S.sel);
   }
-
-  function applyLoop() {
+  const applyLoop = () => {
     el.media.loop = S.loop && !S.sel;
-  }
+  };
 
-  function setSel(a, b) {
-    const dur = duration();
-    S.sel = { start: clamp(a, 0, dur), end: clamp(b, 0, dur) };
+  function onSelectionChanged() {
     layoutOverlays();
     updateSelInfo();
     applyLoop();
+    updateMeter();
+    schedulePrepare();
+    scheduleClip();
   }
-
+  function setSel(a, b, fromHit) {
+    const dur = duration();
+    S.sel = { start: clamp(a, 0, dur), end: clamp(b, 0, dur) };
+    if (fromHit == null) S.hitSel = -1;
+    onSelectionChanged();
+  }
   function clearSel() {
     if (!S.sel) return;
     S.sel = null;
-    layoutOverlays();
-    updateSelInfo();
-    applyLoop();
+    S.hitSel = -1;
+    onSelectionChanged();
   }
 
   /* ---------- playback ---------- */
 
-  function seek(t, reveal) {
-    t = clamp(t, 0, duration() || 0);
-    el.media.currentTime = t;
-    if (reveal) ensureVisible(t);
+  function seek(tm, reveal) {
+    tm = clamp(tm, 0, duration() || 0);
+    el.media.currentTime = tm;
+    if (reveal) ensureVisible(tm);
     updatePlayhead();
   }
 
-  function togglePlay() {
+  function togglePlay(forcePlay) {
     if (!S.file) return;
     const m = el.media;
-    if (!m.paused) {
+    if (!m.paused && !forcePlay) {
       m.pause();
       return;
     }
+    ensureGraph();
+    if (G.ctx && G.ctx.state === 'suspended') G.ctx.resume();
     if (S.sel) {
       if (m.currentTime < S.sel.start - 0.001 || m.currentTime >= S.sel.end - 0.01) m.currentTime = S.sel.start;
-    } else if (m.ended || m.currentTime >= duration() - 0.01) {
-      m.currentTime = 0;
-    }
-    m.play().catch(() => toast('This file can’t be played here.'));
+    } else if (m.ended || m.currentTime >= duration() - 0.01) m.currentTime = 0;
+    m.play().catch(() => toast(t('cantPlay')));
   }
 
   function endOfSelection() {
@@ -375,35 +647,34 @@
     el.media.currentTime = S.sel.start;
   }
 
-  function followPlayhead(t) {
+  function followPlayhead(tm) {
     const span = S.view.end - S.view.start;
     if (span >= duration() - 1e-6) return;
-    if (t > S.view.end - span * 0.02 || t < S.view.start) setView(t - span * 0.1, t + span * 0.9);
+    if (tm > S.view.end - span * 0.02 || tm < S.view.start) setView(tm - span * 0.1, tm + span * 0.9);
   }
 
-  function tick() {
+  function tickLoop() {
     if (!S.playing) return;
-    const t = el.media.currentTime;
+    const tm = el.media.currentTime;
     if (S.sel) {
-      const rem = S.sel.end - t;
+      const rem = S.sel.end - tm;
       if (rem <= 0) endOfSelection();
-      else if (rem < 0.06 && !S.endTimer) {
-        // stop on time instead of up to a frame late
+      else if (rem < 0.06 * Math.max(1, el.media.playbackRate) && !S.endTimer) {
         S.endTimer = setTimeout(() => {
           S.endTimer = null;
           if (S.playing && S.sel && el.media.currentTime >= S.sel.end - 0.03) endOfSelection();
-        }, rem * 1000);
+        }, (rem * 1000) / Math.max(0.25, el.media.playbackRate));
       }
     }
-    followPlayhead(t);
+    followPlayhead(tm);
     updatePlayhead();
-    requestAnimationFrame(tick);
+    requestAnimationFrame(tickLoop);
   }
 
   el.media.addEventListener('play', () => {
     S.playing = true;
     el.play.classList.add('is-playing');
-    requestAnimationFrame(tick);
+    requestAnimationFrame(tickLoop);
   });
   el.media.addEventListener('pause', () => {
     S.playing = false;
@@ -412,33 +683,84 @@
   });
   el.media.addEventListener('seeked', updatePlayhead);
   el.media.addEventListener('loadedmetadata', () => {
-    document.body.classList.toggle('has-video', el.media.videoWidth > 0);
+    applyRate();
     if (!S.audio) {
-      el.dur.textContent = fmtTime(el.media.duration);
+      el.dur.textContent = fmtT(el.media.duration);
       fitView();
     }
   });
-  el.media.addEventListener('error', () => toast('This format can’t be played.', 4000));
+  el.media.addEventListener('error', async () => {
+    const info = S.info;
+    if (!info || !el.media.getAttribute('src')) return;
+    if (S.triedFallback) return toast(t('cantFormat'), 4000);
+    S.triedFallback = true;
+    const id = S.loadId;
+    try {
+      let url;
+      if (info.kind === 'video') {
+        stageMsg(t('previewPrep', { pct: 0 }));
+        url = (await api.prepareProxy(info.path, 'transcode')).url;
+      } else url = (await S.extract()).url;
+      if (id !== S.loadId) return;
+      stageMsg('');
+      el.media.src = url;
+      applyRate();
+    } catch {
+      stageMsg('');
+      toast(t('cantFormat'), 4000);
+    }
+  });
 
-  /* ---------- loudest part ---------- */
+  /* ---------- loudest part and hits ---------- */
 
   function jumpToLoudest() {
-    if (!S.audio) return toast('No waveform to analyse yet.');
-    if (!S.peaks.length) return toast('This file is silent.');
+    if (!S.audio) return toast(t('noWave'));
+    if (!S.peaks.length) return toast(t('silent'));
     S.peakIdx = (S.peakIdx + 1) % S.peaks.length;
     const p = S.peaks[S.peakIdx];
-    const t = p.sample / S.audio.sampleRate;
-    if (S.sel && (t < S.sel.start || t > S.sel.end)) clearSel();
-    seek(t, true);
+    const tm = p.sample / S.audio.sampleRate;
+    if (S.sel && (tm < S.sel.start || tm > S.sel.end)) clearSel();
+    seek(tm, true);
     requestDraw();
-    const db = 20 * Math.log10(p.amp);
-    toast(`Peak ${S.peakIdx + 1} of ${S.peaks.length}  ·  ${db.toFixed(1)} dBFS`);
+    toast(t('peakN', { n: S.peakIdx + 1, m: S.peaks.length, db: (20 * Math.log10(p.amp)).toFixed(1) }));
+  }
+
+  function selectHit(i) {
+    const h = S.hits[i];
+    const sr = S.audio.sampleRate;
+    S.hitSel = i;
+    setSel(h.start / sr, h.end / sr, i);
+    const span = S.view.end - S.view.start;
+    if (h.start / sr < S.view.start || h.end / sr > S.view.end) setView(h.start / sr - span * 0.1, h.start / sr + span * 0.9);
+    seek(h.start / sr);
+    toast(t('hitN', { n: i + 1, m: S.hits.length }), 1400);
+    if (S.playing) togglePlay(true);
+  }
+
+  function gotoHit(dir) {
+    if (!S.audio) return toast(t('noWave'));
+    if (!S.hits.length) return toast(t('noHits'));
+    const sr = S.audio.sampleRate;
+    const cur = el.media.currentTime;
+    let i;
+    if (S.hitSel >= 0 && S.sel) i = S.hitSel + dir;
+    else if (dir > 0) i = S.hits.findIndex((h) => h.start / sr > cur + 0.001);
+    else {
+      i = -1;
+      for (let k = S.hits.length - 1; k >= 0; k--) {
+        if (S.hits[k].start / sr < cur - 0.001) {
+          i = k;
+          break;
+        }
+      }
+    }
+    if (i < 0 || i >= S.hits.length) return toast(t('hitN', { n: Math.max(1, S.hitSel + 1), m: S.hits.length }), 1200);
+    selectHit(i);
   }
 
   /* ---------- pointer: seek, select, resize ---------- */
 
   let drag = null;
-
   el.wave.addEventListener('mousedown', (e) => {
     if (e.button !== 0 || !S.file) return;
     const handle = e.target.closest('.handle');
@@ -448,28 +770,26 @@
       drag = { type: 'resize', anchor: handle.dataset.side === 'l' ? S.sel.end : S.sel.start };
       return;
     }
-    if (e.target.closest('#selection')) return; // let the browser start a drag-out
+    if (e.target.closest('#selection')) return;
     e.preventDefault();
     drag = { type: 'new', x0: e.clientX - el.wave.getBoundingClientRect().left, moved: false };
   });
-
   window.addEventListener('mousemove', (e) => {
     if (!drag) return;
     const r = el.wave.getBoundingClientRect();
     const x = clamp(e.clientX - r.left, 0, r.width);
     if (drag.type === 'resize') {
-      const t = x2t(x);
-      setSel(Math.min(drag.anchor, t), Math.max(drag.anchor, t));
+      const tm = x2t(x);
+      setSel(Math.min(drag.anchor, tm), Math.max(drag.anchor, tm));
       return;
     }
     if (!drag.moved && Math.abs(x - drag.x0) < 4) return;
-    if (!S.audio) return; // can only select what we can export
+    if (!S.audio) return;
     drag.moved = true;
     const a = x2t(drag.x0);
     const b = x2t(x);
     setSel(Math.min(a, b), Math.max(a, b));
   });
-
   window.addEventListener('mouseup', () => {
     if (!drag) return;
     const d = drag;
@@ -482,11 +802,7 @@
     if (!S.sel || S.sel.end - S.sel.start < 0.002) clearSel();
     else seek(S.sel.start);
   });
-
-  // plain click on the selection (no drag-out) places the playhead
-  el.selection.addEventListener('click', (e) => {
-    seek(x2t(e.clientX - el.wave.getBoundingClientRect().left));
-  });
+  el.selection.addEventListener('click', (e) => seek(x2t(e.clientX - el.wave.getBoundingClientRect().left)));
 
   el.wave.addEventListener(
     'wheel',
@@ -497,8 +813,7 @@
       if (e.ctrlKey || e.metaKey) {
         const x = e.clientX - el.wave.getBoundingClientRect().left;
         const anchor = x2t(x);
-        const factor = Math.exp(clamp(e.deltaY, -120, 120) * 0.0025);
-        const newSpan = span * factor;
+        const newSpan = span * Math.exp(clamp(e.deltaY, -120, 120) * 0.0025);
         setView(anchor - (x / W()) * newSpan, anchor - (x / W()) * newSpan + newSpan);
       } else {
         const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
@@ -508,121 +823,603 @@
     { passive: false }
   );
 
-  /* ---------- drag out (selection or whole file) ---------- */
+  /* ---------- exporting ---------- */
 
-  function renderSelection() {
+  function snappedRegion(aSec, bSec) {
     const sr = S.audio.sampleRate;
-    const a = clamp(Math.round(S.sel.start * sr), 0, S.audio.length);
-    const b = clamp(Math.round(S.sel.end * sr), 0, S.audio.length);
-    const base = S.file.name.replace(/\.[^.]+$/, '');
-    return {
-      bytes: A.encodeWav(S.audio.channels, sr, a, b),
-      name: `${base}_${stamp(a / sr)}-${stamp(b / sr)}.wav`,
-    };
+    const chs = S.audio.channels;
+    let a = clamp(Math.round(aSec * sr), 0, S.audio.length);
+    let b = clamp(Math.round(bSec * sr), 0, S.audio.length);
+    if (prefs.snap) {
+      a = A.snapZero(chs, a, sr, 3);
+      b = A.snapZero(chs, b, sr, 3);
+    }
+    if (b <= a) b = Math.min(S.audio.length, a + 1);
+    return [a, b];
   }
 
-  function pathToDrag() {
+  function renderChannelsSync(a, b) {
+    const chans = S.audio.channels.map((c) => c.slice(a, b));
+    A.applyFade(chans, S.audio.sampleRate, prefs.fade, prefs.fade);
+    return chans;
+  }
+
+  // Cut, then (if asked) run through varispeed + EQ with the same graph the player uses.
+  async function renderChannels(a, b) {
+    const sr = S.audio.sampleRate;
+    let chans = S.audio.channels.map((c) => c.slice(a, b));
+    if (processingActive()) {
+      const rate = A.semitoneRate(prefs.st);
+      const inLen = chans[0].length;
+      const outLen = Math.max(1, Math.ceil(inLen / rate));
+      const oc = new OfflineAudioContext(chans.length, outLen, sr);
+      const buf = oc.createBuffer(chans.length, inLen, sr);
+      chans.forEach((c, i) => buf.copyToChannel(c, i));
+      const src = oc.createBufferSource();
+      src.buffer = buf;
+      src.playbackRate.value = rate;
+      const chain = EQ.buildChain(oc, src, eqState);
+      chain.out.connect(oc.destination);
+      src.start();
+      const rendered = await oc.startRendering();
+      chans = [];
+      for (let i = 0; i < rendered.numberOfChannels; i++) chans.push(rendered.getChannelData(i).slice());
+    }
+    A.applyFade(chans, sr, prefs.fade, prefs.fade);
+    return chans;
+  }
+
+  const fxSuffix = () => {
+    if (!processingActive()) return '';
+    let s = '';
+    if (EQ.isActive(eqState)) s += '_EQ';
+    if (prefs.st !== 0) s += '_' + (prefs.st > 0 ? '+' : '') + prefs.st.toFixed(1) + 'st';
+    return s;
+  };
+
+  function exportName(a, b, idx) {
+    const sr = S.audio.sampleRate;
+    const pad = (n) => String(n).padStart(2, '0');
+    let name;
+    if (prefs.naming === 'ucs') name = A.ucsName(prefs.ucs, idx);
+    else if (idx != null) name = `${baseName(S.file.name)}_hit${pad(idx)}`;
+    else name = `${baseName(S.file.name)}_${A.stamp(a / sr)}-${A.stamp(b / sr)}`;
+    return name + fxSuffix() + '.wav';
+  }
+
+  function exportKey() {
+    return JSON.stringify([
+      S.file.path, S.sel && +S.sel.start.toFixed(5), S.sel && +S.sel.end.toFixed(5), prefs.snap, prefs.fade,
+      processingActive() ? [prefs.st, eqState.bands, eqState.out, eqState.bypass] : 0,
+      prefs.naming, prefs.naming === 'ucs' ? prefs.ucs : 0,
+    ]);
+  }
+
+  // Processed exports are rendered a moment after the selection settles, so the drag can start instantly.
+  let prepTimer = null;
+  let prepSeq = 0;
+  function schedulePrepare(delay) {
+    clearTimeout(prepTimer);
+    S.prepared = null;
+    const seq = ++prepSeq;
+    if (!S.audio || !S.sel || !processingActive()) {
+      el.grip.classList.remove('busy');
+      return;
+    }
+    el.grip.classList.add('busy');
+    prepTimer = setTimeout(async () => {
+      try {
+        const key = exportKey();
+        const [a, b] = snappedRegion(S.sel.start, S.sel.end);
+        const chans = await renderChannels(a, b);
+        if (seq !== prepSeq) return;
+        S.prepared = { key, bytes: A.encodeWav(chans, S.audio.sampleRate), name: exportName(a, b) };
+        el.grip.classList.remove('busy');
+      } catch (err) {
+        console.error(err);
+        if (seq === prepSeq) el.grip.classList.remove('busy');
+      }
+    }, delay == null ? 280 : delay);
+  }
+
+  function dragPath() {
     if (!S.file) return null;
-    if (!S.sel || !S.audio) return S.file.path; // nothing selected: hand over the original
-    const { bytes, name } = renderSelection();
-    const p = api.writeExportSync(name, bytes);
-    if (!p) toast('Couldn’t write the export file.');
+    if (!S.sel || !S.audio) return S.file.path;
+    let p;
+    if (processingActive()) {
+      if (S.prepared && S.prepared.key === exportKey()) p = api.writeExportSync(S.prepared.name, S.prepared.bytes);
+      else {
+        toast(t('preparing'));
+        schedulePrepare(0);
+        return null;
+      }
+    } else {
+      const [a, b] = snappedRegion(S.sel.start, S.sel.end);
+      p = api.writeExportSync(exportName(a, b), A.encodeWav(renderChannelsSync(a, b), S.audio.sampleRate));
+    }
+    if (!p) toast(t('writeFail'));
     return p;
   }
 
   function onDragStart(e) {
     e.preventDefault(); // hand the drag to the OS so it carries a real file
-    const p = pathToDrag();
+    const p = dragPath();
     if (p) api.startDrag(p);
   }
   el.selection.addEventListener('dragstart', onDragStart);
   el.grip.addEventListener('dragstart', onDragStart);
 
-  api.onMenuExport(async () => {
-    if (!S.audio || !S.sel) return toast('Select part of the waveform first.');
-    const { bytes, name } = renderSelection();
-    const saved = await api.saveAs(name, bytes);
-    if (saved) toast('Saved.');
+  // Video clip: cut by ffmpeg in the background, then it's ready to drag.
+  let clipTimer = null;
+  let clipSeq = 0;
+  const clipKey = () => S.info.path + '|' + S.sel.start.toFixed(3) + '|' + S.sel.end.toFixed(3);
+  function scheduleClip() {
+    clearTimeout(clipTimer);
+    api.cancelJob('clip');
+    S.clip = null;
+    const seq = ++clipSeq;
+    const ok = S.info && S.info.kind === 'video' && S.info.probe && S.info.probe.video && S.sel;
+    el.gripVideo.hidden = !ok;
+    if (!ok) return;
+    if (S.sel.end - S.sel.start > 300) {
+      el.gripVideoText.textContent = t('clipTooLong');
+      el.gripVideo.classList.add('busy');
+      return;
+    }
+    el.gripVideoText.textContent = t('gripVideoPrep', { pct: 0 });
+    el.gripVideo.classList.add('busy');
+    clipTimer = setTimeout(async () => {
+      const key = clipKey();
+      try {
+        const r = await api.renderClip(S.info.path, S.sel.start, S.sel.end);
+        if (seq !== clipSeq) return;
+        S.clip = { path: r.path, key };
+        el.gripVideoText.textContent = t('gripVideo');
+        el.gripVideo.classList.remove('busy');
+      } catch (err) {
+        if (seq !== clipSeq) return;
+        el.gripVideoText.textContent = t('previewFail');
+      }
+    }, 900);
+  }
+  el.gripVideo.addEventListener('dragstart', (e) => {
+    e.preventDefault();
+    if (!S.sel || !S.clip || S.clip.key !== clipKey()) return toast(t('preparing'));
+    const name = `${baseName(S.file.name)}_${A.stamp(S.sel.start)}-${A.stamp(S.sel.end)}.mp4`;
+    const p = api.copyExportSync(S.clip.path, name);
+    if (p) api.startDrag(p);
+    else toast(t('writeFail'));
   });
+
+  async function exportSelection() {
+    if (!S.audio || !S.sel) return toast(t('selectFirst'));
+    const [a, b] = snappedRegion(S.sel.start, S.sel.end);
+    const chans = await renderChannels(a, b);
+    const saved = await api.saveAs(exportName(a, b), A.encodeWav(chans, S.audio.sampleRate));
+    if (saved) toast(t('saved'));
+  }
+
+  let exporting = false;
+  async function exportAllHits() {
+    if (!S.audio) return toast(t('noWave'));
+    if (!S.hits.length) return toast(t('noHits'));
+    if (exporting) return;
+    const dir = await api.chooseExportDir();
+    if (!dir) return;
+    exporting = true;
+    let last = null;
+    try {
+      for (let i = 0; i < S.hits.length; i++) {
+        toast(t('exportingN', { n: i + 1, m: S.hits.length }), 0);
+        const sr = S.audio.sampleRate;
+        const [a, b] = snappedRegion(S.hits[i].start / sr, S.hits[i].end / sr);
+        const chans = await renderChannels(a, b);
+        last = await api.writeTo(dir, exportName(a, b, i + 1), A.encodeWav(chans, sr));
+        await tick();
+      }
+      toast(t('savedN', { n: S.hits.length }), 3500);
+      if (last) api.reveal(last);
+    } catch (err) {
+      console.error(err);
+      toast(t('writeFail'));
+    } finally {
+      exporting = false;
+    }
+  }
+
+  /* ---------- folder list ---------- */
+
+  const ROW_H = 30;
+  function setFolder(dir, files) {
+    S.folder = { dir, files, shown: files };
+    el.filter.value = '';
+    el.folderName.textContent = `${lastPart(dir)} · ${t('folderCount', { n: files.length })}`;
+    el.folderName.title = dir;
+    applyFilter();
+  }
+  function applyFilter() {
+    const q = el.filter.value.trim().toLowerCase();
+    const f = S.folder.files;
+    S.folder.shown = q ? f.filter((x) => x.name.toLowerCase().includes(q)) : f;
+    el.listSpacer.style.height = S.folder.shown.length * ROW_H + 'px';
+    el.listEmpty.hidden = S.folder.shown.length > 0;
+    renderRows();
+  }
+  function renderRows() {
+    if (el.side.hidden) return;
+    const shown = S.folder.shown;
+    const st = el.list.scrollTop;
+    const h = el.list.clientHeight || 400;
+    const i0 = Math.max(0, Math.floor(st / ROW_H) - 4);
+    const i1 = Math.min(shown.length, Math.ceil((st + h) / ROW_H) + 4);
+    let html = '';
+    for (let i = i0; i < i1; i++) {
+      const f = shown[i];
+      const active = S.file && S.file.path === f.path ? ' active' : '';
+      html += `<div class="row-file${active}" data-i="${i}" title="${esc(f.name)}"><span class="n">${esc(f.name)}</span><span class="s">${fmtSize(f.size)}</span></div>`;
+    }
+    el.listRows.innerHTML = html;
+    el.listRows.style.transform = `translateY(${i0 * ROW_H}px)`;
+  }
+  function scrollToActive() {
+    if (el.side.hidden || !S.file) return;
+    const i = S.folder.shown.findIndex((f) => f.path === S.file.path);
+    if (i < 0) return;
+    const top = i * ROW_H;
+    if (top < el.list.scrollTop || top + ROW_H > el.list.scrollTop + el.list.clientHeight) el.list.scrollTop = Math.max(0, top - el.list.clientHeight / 2);
+    renderRows();
+  }
+  async function openFromList(f) {
+    const r = await api.resolve(f.path, { skipList: true });
+    if (r) handleResolved(r, { autoplay: true });
+  }
+  function navigate(delta) {
+    const shown = S.folder.shown;
+    if (!shown.length) return;
+    let i = S.file ? shown.findIndex((f) => f.path === S.file.path) : -1;
+    i = i < 0 ? (delta > 0 ? 0 : shown.length - 1) : clamp(i + delta, 0, shown.length - 1);
+    openFromList(shown[i]);
+  }
+  el.list.addEventListener('scroll', renderRows);
+  el.listRows.addEventListener('click', (e) => {
+    const row = e.target.closest('.row-file');
+    if (row) openFromList(S.folder.shown[Number(row.dataset.i)]);
+  });
+  el.filter.addEventListener('input', applyFilter);
+  function setSidebar(on) {
+    prefs.sidebar = on;
+    el.side.hidden = !on;
+    el.folderBtn.setAttribute('aria-pressed', String(on));
+    savePrefs();
+    renderRows();
+    scrollToActive();
+  }
+
+  /* ---------- EQ panel ---------- */
+
+  const eqUI = EQ.createUI({
+    canvas: el.eqCanvas,
+    paramsEl: el.eqParams,
+    state: eqState,
+    analyser: () => (G.ctx ? { node: G.analyser, sampleRate: G.ctx.sampleRate } : null),
+    isVisible: () => prefs.eqOpen,
+    onChange: onEqChange,
+  });
+  function persistEq() {
+    prefs.eq = { bands: eqState.bands, out: eqState.out, bypass: eqState.bypass };
+    savePrefs();
+  }
+  function onEqChange() {
+    persistEq();
+    if (G.ctx && !EQ.updateChain(G.chain, G.ctx, eqState)) rebuildChain();
+    el.eqBypass.classList.toggle('on', eqState.bypass);
+    updateFx();
+    schedulePrepare();
+  }
+  let eqRunning = false;
+  function eqLoop() {
+    if (!prefs.eqOpen) {
+      eqRunning = false;
+      return;
+    }
+    eqUI.draw();
+    requestAnimationFrame(eqLoop);
+  }
+  function setEqOpen(on) {
+    prefs.eqOpen = on;
+    el.eqPanel.hidden = !on;
+    document.body.classList.toggle('eq-open', on);
+    el.eqBtn.setAttribute('aria-pressed', String(on));
+    savePrefs();
+    if (on) {
+      ensureGraph();
+      requestAnimationFrame(() => {
+        eqUI.resize();
+        if (!eqRunning) {
+          eqRunning = true;
+          eqLoop();
+        }
+      });
+    }
+  }
+  new ResizeObserver(() => eqUI.resize()).observe(el.eqCanvas.parentElement);
+  el.eqBypass.addEventListener('click', () => {
+    eqState.bypass = !eqState.bypass;
+    onEqChange();
+  });
+  el.eqReset.addEventListener('click', () => {
+    eqState.bands.length = 0;
+    eqState.out = 0;
+    eqState.bypass = false;
+    el.eqOut.value = '0';
+    el.eqOutVal.textContent = '0.0 dB';
+    eqUI.setState(eqState);
+    onEqChange();
+  });
+  el.eqOut.addEventListener('input', () => {
+    eqState.out = parseFloat(el.eqOut.value) || 0;
+    el.eqOutVal.textContent = (eqState.out > 0 ? '+' : '') + eqState.out.toFixed(1) + ' dB';
+    onEqChange();
+  });
+
+  /* ---------- options popover ---------- */
+
+  function stLabel() {
+    const r = A.semitoneRate(prefs.st);
+    el.stOut.textContent = `${prefs.st > 0 ? '+' : ''}${prefs.st.toFixed(1)} st · ${r.toFixed(2)}×`;
+  }
+  function updateUcsPreview() {
+    el.ucsPreview.textContent = A.ucsName(prefs.ucs) + '.wav';
+  }
+  function syncOptionsUI() {
+    el.st.value = String(prefs.st);
+    stLabel();
+    el.sens.value = String(prefs.sens);
+    el.sensOut.textContent = prefs.sens + ' dB';
+    el.snap.checked = prefs.snap;
+    el.fade.value = String(prefs.fade);
+    el.applyFx.checked = prefs.applyFx;
+    el.nameOrig.classList.toggle('on', prefs.naming !== 'ucs');
+    el.nameUcs.classList.toggle('on', prefs.naming === 'ucs');
+    el.ucsFields.hidden = prefs.naming !== 'ucs';
+    el.ucsCat.value = prefs.ucs.catId;
+    el.ucsFx.value = prefs.ucs.fxName;
+    el.ucsCreator.value = prefs.ucs.creatorId;
+    el.ucsSource.value = prefs.ucs.sourceId;
+    updateUcsPreview();
+    el.langSeg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.lang === I.lang));
+    el.eqOut.value = String(eqState.out);
+    el.eqOutVal.textContent = (eqState.out > 0 ? '+' : '') + eqState.out.toFixed(1) + ' dB';
+    el.eqBypass.classList.toggle('on', eqState.bypass);
+    el.vol.value = String(prefs.vol);
+    el.specBtn.setAttribute('aria-pressed', String(prefs.spec));
+  }
+
+  function toggleOpts(force) {
+    const show = force != null ? force : el.opts.hidden;
+    el.opts.hidden = !show;
+    el.optsBtn.setAttribute('aria-pressed', String(show));
+  }
+  el.optsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleOpts();
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (!el.opts.hidden && !el.opts.contains(e.target) && !el.optsBtn.contains(e.target)) toggleOpts(false);
+  });
+
+  el.st.addEventListener('input', () => {
+    prefs.st = Math.round(parseFloat(el.st.value) * 10) / 10 || 0;
+    stLabel();
+    applyRate();
+    updateFx();
+    schedulePrepare();
+    savePrefs();
+  });
+  el.stReset.addEventListener('click', () => {
+    el.st.value = '0';
+    el.st.dispatchEvent(new Event('input'));
+  });
+  let sensTimer = null;
+  el.sens.addEventListener('input', () => {
+    prefs.sens = parseInt(el.sens.value, 10) || 10;
+    el.sensOut.textContent = prefs.sens + ' dB';
+    savePrefs();
+    clearTimeout(sensTimer);
+    sensTimer = setTimeout(() => {
+      if (!S.audio) return;
+      S.hits = A.detectHits(S.audio.channels, S.audio.sampleRate, { riseDb: prefs.sens });
+      S.hitSel = -1;
+      requestDraw();
+    }, 120);
+  });
+  const onExportOpt = () => {
+    prefs.snap = el.snap.checked;
+    prefs.fade = parseInt(el.fade.value, 10) || 0;
+    prefs.applyFx = el.applyFx.checked;
+    updateFx();
+    schedulePrepare();
+    savePrefs();
+  };
+  el.snap.addEventListener('change', onExportOpt);
+  el.fade.addEventListener('change', onExportOpt);
+  el.applyFx.addEventListener('change', onExportOpt);
+  const setNaming = (n) => {
+    prefs.naming = n;
+    syncOptionsUI();
+    schedulePrepare();
+    savePrefs();
+  };
+  el.nameOrig.addEventListener('click', () => setNaming('orig'));
+  el.nameUcs.addEventListener('click', () => setNaming('ucs'));
+  for (const [input, key] of [[el.ucsCat, 'catId'], [el.ucsFx, 'fxName'], [el.ucsCreator, 'creatorId'], [el.ucsSource, 'sourceId']]) {
+    input.addEventListener('input', () => {
+      prefs.ucs[key] = input.value;
+      updateUcsPreview();
+      schedulePrepare();
+      savePrefs();
+    });
+  }
+  el.langSeg.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-lang]');
+    if (b) setLang(b.dataset.lang);
+  });
+  el.setDefault.addEventListener('click', () => {
+    toggleOpts(false);
+    api.askDefault();
+  });
+  el.openExports.addEventListener('click', () => api.openExportsDir());
+
+  function setLang(l) {
+    I.lang = l;
+    prefs.lang = l;
+    savePrefs();
+    api.setLang(l);
+    I.apply();
+    eqUI.renderParams();
+    syncOptionsUI();
+    updateSelInfo();
+    if (S.folder.dir) el.folderName.textContent = `${lastPart(S.folder.dir)} · ${t('folderCount', { n: S.folder.files.length })}`;
+    if (S.lastMeter) renderMeter(S.lastMeter);
+    updateFx();
+    scheduleClip();
+  }
 
   /* ---------- buttons, keys, drop ---------- */
 
   async function chooseFile() {
-    const info = await api.openDialog();
-    if (info) loadFile(info);
+    handleResolved(await api.openDialog());
+  }
+  async function chooseFolder() {
+    handleResolved(await api.openFolderDialog());
   }
 
-  el.play.addEventListener('click', togglePlay);
+  el.play.addEventListener('click', () => togglePlay());
   el.loudest.addEventListener('click', jumpToLoudest);
+  el.prevHit.addEventListener('click', () => gotoHit(-1));
+  el.nextHit.addEventListener('click', () => gotoHit(1));
   el.open.addEventListener('click', chooseFile);
   el.openBig.addEventListener('click', chooseFile);
+  el.openFolderBig.addEventListener('click', chooseFolder);
+  el.folderBtn.addEventListener('click', () => {
+    if (!S.folder.files.length && el.side.hidden) return chooseFolder();
+    setSidebar(el.side.hidden);
+  });
   el.loop.addEventListener('click', () => {
     S.loop = !S.loop;
     el.loop.classList.toggle('on', S.loop);
     el.loop.setAttribute('aria-pressed', String(S.loop));
     applyLoop();
   });
-
-  try {
-    const v = parseFloat(localStorage.getItem('crest.vol'));
-    if (isFinite(v)) el.vol.value = String(clamp(v, 0, 1));
-  } catch {}
-  el.media.volume = parseFloat(el.vol.value);
+  el.specBtn.addEventListener('click', () => {
+    prefs.spec = !prefs.spec;
+    el.specBtn.setAttribute('aria-pressed', String(prefs.spec));
+    savePrefs();
+    requestDraw();
+  });
+  el.eqBtn.addEventListener('click', () => setEqOpen(!prefs.eqOpen));
+  el.timeBtn.addEventListener('click', () => {
+    prefs.tc = !prefs.tc;
+    savePrefs();
+    updatePlayhead();
+    el.dur.textContent = fmtT(duration());
+  });
   el.vol.addEventListener('input', () => {
-    el.media.volume = parseFloat(el.vol.value);
-    try {
-      localStorage.setItem('crest.vol', el.vol.value);
-    } catch {}
+    prefs.vol = parseFloat(el.vol.value);
+    applyVolume();
+    savePrefs();
   });
 
-  // keep keyboard focus off buttons so Space always means play/pause
+  // video: fullscreen, frame stepping, splitter
+  function toggleFullscreen() {
+    if (!S.info || S.info.kind !== 'video') return;
+    if (document.fullscreenElement) document.exitFullscreen();
+    else el.stage.requestFullscreen().catch(() => {});
+  }
+  el.media.addEventListener('dblclick', toggleFullscreen);
+  el.media.addEventListener('click', () => togglePlay());
+  function stepFrame(dir) {
+    if (!S.fps || !S.info || S.info.kind !== 'video') return;
+    el.media.pause();
+    const n = Math.floor(el.media.currentTime * S.fps + 1e-6) + dir;
+    const target = clamp((Math.max(0, n) + 0.5) / S.fps, 0, duration() || 0);
+    seek(target, true);
+    // a busy decoder can complete a seek without moving: check on 'seeked' and retry once
+    el.media.addEventListener(
+      'seeked',
+      () => {
+        if (Math.abs(el.media.currentTime - target) > 0.5 / S.fps) {
+          el.media.currentTime = target;
+          updatePlayhead();
+        }
+      },
+      { once: true }
+    );
+  }
+  let split = null;
+  el.splitter.addEventListener('pointerdown', (e) => {
+    split = { y: e.clientY, h: $('wavePanel').getBoundingClientRect().height };
+    el.splitter.setPointerCapture(e.pointerId);
+  });
+  el.splitter.addEventListener('pointermove', (e) => {
+    if (!split) return;
+    const mainH = el.stage.parentElement.getBoundingClientRect().height;
+    const h = clamp(split.h + (split.y - e.clientY), 110, mainH - 140);
+    document.documentElement.style.setProperty('--wave-h', h + 'px');
+    prefs.waveH = h;
+  });
+  el.splitter.addEventListener('pointerup', () => {
+    split = null;
+    savePrefs();
+  });
+
   document.addEventListener('click', (e) => {
     const b = e.target.closest('button');
-    if (b) b.blur();
+    if (b && !b.closest('.pop')) b.blur();
   });
 
   window.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const onSlider = e.target === el.vol;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
     switch (e.key) {
       case ' ':
         e.preventDefault();
         togglePlay();
         break;
-      case 'p':
-      case 'P':
-        jumpToLoudest();
-        break;
-      case 'l':
-      case 'L':
-        el.loop.click();
-        break;
+      case 'p': case 'P': jumpToLoudest(); break;
+      case ']': gotoHit(1); break;
+      case '[': gotoHit(-1); break;
+      case 'l': case 'L': el.loop.click(); break;
+      case 's': case 'S': el.specBtn.click(); break;
+      case 'e': case 'E': setEqOpen(!prefs.eqOpen); break;
+      case 'b': case 'B': el.folderBtn.click(); break;
+      case 'f': case 'F': toggleFullscreen(); break;
+      case ',': stepFrame(-1); break;
+      case '.': stepFrame(1); break;
       case 'Escape':
-        clearSel();
+        if (!el.opts.hidden) toggleOpts(false);
+        else clearSel();
         break;
-      case 'z':
-      case 'Z':
-        zoomToSelection();
-        break;
-      case '0':
-        fitView();
-        break;
-      case 'Home':
-        if (S.file) seek(0, true);
-        break;
-      case 'End':
-        if (S.file) seek(duration(), true);
-        break;
+      case 'z': case 'Z': zoomToSelection(); break;
+      case '0': fitView(); break;
+      case 'Home': if (S.file) seek(0, true); break;
+      case 'End': if (S.file) seek(duration(), true); break;
+      case 'ArrowUp': e.preventDefault(); navigate(-1); break;
+      case 'ArrowDown': e.preventDefault(); navigate(1); break;
       case 'ArrowLeft':
       case 'ArrowRight':
-        if (onSlider || !S.file) break;
+        if (!S.file) break;
         e.preventDefault();
         seek(el.media.currentTime + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 10 : 1), true);
         break;
     }
   });
   window.addEventListener('keyup', (e) => {
-    if (e.key === ' ') e.preventDefault();
+    if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test((e.target && e.target.tagName) || '')) e.preventDefault();
   });
 
   let dropDepth = 0;
@@ -643,10 +1440,43 @@
     const f = e.dataTransfer && e.dataTransfer.files[0];
     if (!f) return;
     const p = api.pathForFile(f);
-    if (!p) return;
-    const info = await api.readFile(p);
-    if (info) loadFile(info);
+    if (p) handleResolved(await api.resolve(p));
   });
 
-  api.onFileOpened(loadFile);
+  api.onResolved((r) => handleResolved(r));
+  api.onMenu((name) => {
+    if (name === 'open') chooseFile();
+    else if (name === 'open-folder') chooseFolder();
+    else if (name === 'export') exportSelection();
+    else if (name === 'export-hits') exportAllHits();
+  });
+  api.onProgress(({ kind, pct }) => {
+    const p = Math.round(pct * 100);
+    if (kind === 'proxy') stageMsg(t('previewPrep', { pct: p }));
+    else if (kind === 'extract' && !S.audio) toast(t('readingPct', { pct: p }), 0);
+    else if (kind === 'clip' && !S.clip) el.gripVideoText.textContent = t('gripVideoPrep', { pct: p });
+  });
+
+  /* ---------- init ---------- */
+
+  (async () => {
+    I.lang = prefs.lang || (await api.getLang());
+    I.apply();
+    document.documentElement.style.setProperty('--wave-h', clamp(prefs.waveH || 210, 110, 900) + 'px');
+    syncOptionsUI();
+    stLabel();
+    applyRate();
+    updateSelInfo();
+    updateFx();
+    ensureGraph();
+    el.side.hidden = !prefs.sidebar;
+    el.folderBtn.setAttribute('aria-pressed', String(prefs.sidebar));
+    if (prefs.eqOpen) setEqOpen(true);
+    document.body.dataset.ready = '1';
+  })();
+
+  // exposed only for the automated end-to-end test (main adds ?e2e=1 under CREST_E2E)
+  if (new URLSearchParams(location.search).has('e2e')) {
+    window.__crest = { S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
+  }
 })();

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' data:; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+        content="default-src 'self'; img-src 'self' data: blob:; media-src crest: blob:; connect-src crest:; style-src 'self' 'unsafe-inline'; script-src 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crest</title>
   <link rel="stylesheet" href="style.css">
@@ -11,76 +11,183 @@
 <body class="empty">
   <header class="topbar"><span id="title">Crest</span></header>
 
-  <main>
-    <section id="stage"><video id="media" playsinline preload="auto"></video></section>
-
-    <section id="wavePanel">
-      <div id="wave">
-        <canvas id="canvas"></canvas>
-        <div id="playhead"></div>
-        <div id="selection" draggable="true">
-          <span class="handle l" data-side="l"></span>
-          <span class="handle r" data-side="r"></span>
-          <span id="selLabel">Drag to your DAW</span>
-        </div>
-        <div id="status" role="status"></div>
+  <div id="layout">
+    <aside id="side" hidden>
+      <div class="side-head">
+        <input id="filter" type="search" data-i18n-ph="filter" autocomplete="off" spellcheck="false">
+        <div id="folderName"></div>
       </div>
-    </section>
+      <div id="list"><div id="listSpacer"><div id="listRows"></div></div></div>
+      <div id="listEmpty" data-i18n="folderEmpty" hidden></div>
+    </aside>
 
-    <section id="empty">
-      <svg class="empty-icon" viewBox="0 0 64 32" aria-hidden="true">
-        <g fill="currentColor">
-          <rect x="2" y="12" width="4" height="8" rx="2"/><rect x="10" y="6" width="4" height="20" rx="2"/>
-          <rect x="18" y="10" width="4" height="12" rx="2"/><rect x="26" y="2" width="4" height="28" rx="2"/>
-          <rect x="34" y="8" width="4" height="16" rx="2"/><rect x="42" y="4" width="4" height="24" rx="2"/>
-          <rect x="50" y="11" width="4" height="10" rx="2"/><rect x="58" y="14" width="4" height="4" rx="2"/>
-        </g>
-      </svg>
-      <h1>Drop an audio or video file</h1>
-      <button class="btn primary" id="openBig">Open file&hellip;</button>
-      <p class="hint">Select part of the waveform, then drag it into your DAW or a folder.</p>
-    </section>
-  </main>
+    <main>
+      <section id="stage">
+        <video id="media" crossorigin="anonymous" playsinline preload="auto"></video>
+        <div id="stageMsg"></div>
+      </section>
+      <div id="splitter" role="separator" aria-orientation="horizontal"></div>
+
+      <section id="wavePanel">
+        <div id="wave">
+          <canvas id="canvas"></canvas>
+          <div id="playhead"></div>
+          <div id="selection" draggable="true">
+            <span class="handle l" data-side="l"></span>
+            <span class="handle r" data-side="r"></span>
+            <span id="selLabel" data-i18n="selDrag"></span>
+          </div>
+          <div id="meter"></div>
+          <div id="fx"></div>
+          <div id="status" role="status"></div>
+        </div>
+      </section>
+
+      <section id="eqPanel" hidden>
+        <div class="eq-head">
+          <strong>EQ</strong>
+          <button class="mini" id="eqBypass" data-i18n="eqBypass"></button>
+          <button class="mini" id="eqReset" data-i18n="eqReset"></button>
+          <label class="eq-out"><span data-i18n="eqOut"></span>
+            <input id="eqOut" type="range" min="-12" max="12" step="0.1" value="0"><output id="eqOutVal">0.0 dB</output>
+          </label>
+          <span class="spacer"></span>
+          <span class="eq-hint" data-i18n="eqHint"></span>
+        </div>
+        <div class="eq-graph"><canvas id="eqCanvas"></canvas></div>
+        <div class="eq-params" id="eqParams"></div>
+      </section>
+
+      <section id="empty">
+        <svg class="empty-icon" viewBox="0 0 64 32" aria-hidden="true">
+          <g fill="currentColor">
+            <rect x="2" y="12" width="4" height="8" rx="2"/><rect x="10" y="6" width="4" height="20" rx="2"/>
+            <rect x="18" y="10" width="4" height="12" rx="2"/><rect x="26" y="2" width="4" height="28" rx="2"/>
+            <rect x="34" y="8" width="4" height="16" rx="2"/><rect x="42" y="4" width="4" height="24" rx="2"/>
+            <rect x="50" y="11" width="4" height="10" rx="2"/><rect x="58" y="14" width="4" height="4" rx="2"/>
+          </g>
+        </svg>
+        <h1 data-i18n="dropTitle"></h1>
+        <div class="empty-actions">
+          <button class="btn primary" id="openBig" data-i18n="openBtn"></button>
+          <button class="btn" id="openFolderBig" data-i18n="openFolderBtn"></button>
+        </div>
+        <p class="hint" data-i18n="emptyHint"></p>
+      </section>
+    </main>
+  </div>
 
   <footer class="bar">
-    <button class="play" id="play" title="Play / pause (Space)" aria-label="Play / pause">
+    <button class="play" id="play" data-i18n-title="tPlay">
       <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>
       <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
     </button>
 
-    <div class="time"><span id="cur">0:00.000</span><span class="sep">/</span><span id="dur">0:00.000</span></div>
+    <button class="time" id="timeBtn" data-i18n-title="tTime"><span id="cur">0:00.000</span><span class="sep">/</span><span id="dur">0:00.000</span></button>
 
-    <button class="btn" id="loudest" title="Jump to the loudest part. Press again for the next loudest (P)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2.5-7 4 14 3-9 1.5 2h5"/></svg>
-      <span class="lbl">Loudest</span>
-    </button>
+    <div class="grp">
+      <button class="btn" id="loudest" data-i18n-title="tLoudest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2.5-7 4 14 3-9 1.5 2h5"/></svg>
+        <span class="lbl" data-i18n="loudest"></span>
+      </button>
+      <button class="btn icon" id="prevHit" data-i18n-title="tPrevHit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <button class="btn icon" id="nextHit" data-i18n-title="tNextHit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button>
+    </div>
 
-    <button class="btn" id="loop" title="Loop (L)" aria-pressed="false">
+    <button class="btn icon" id="loop" data-i18n-title="tLoop" aria-pressed="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>
-      <span class="lbl">Loop</span>
     </button>
 
-    <label class="vol" title="Volume">
+    <label class="vol" data-i18n-title="tVol">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       <input id="vol" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
     </label>
 
     <div class="spacer"></div>
 
-    <div id="selInfo" hidden></div>
-
-    <div class="grip" id="grip" draggable="true" title="Drag the selection (or the whole file) into your DAW or a folder">
+    <div class="grip" id="gripVideo" draggable="true" hidden data-i18n-title="tGripVideo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg>
+      <span id="gripVideoText" data-i18n="gripVideo"></span>
+    </div>
+    <div class="grip" id="grip" draggable="true" data-i18n-title="tGrip">
       <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
-      <span id="gripText">Drag file</span>
+      <span id="gripText" data-i18n="gripFile"></span>
     </div>
 
-    <button class="btn" id="open" title="Open file (Ctrl/Cmd+O)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-      <span class="lbl">Open</span>
-    </button>
+    <div class="grp">
+      <button class="btn icon" id="folderBtn" data-i18n-title="tFolder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      </button>
+      <button class="btn" id="open" data-i18n-title="tOpen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        <span class="lbl" data-i18n="open"></span>
+      </button>
+      <button class="btn icon" id="specBtn" data-i18n-title="tSpec" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="14" width="3" height="6" rx="1"/><rect x="8" y="8" width="3" height="12" rx="1"/><rect x="13" y="11" width="3" height="9" rx="1"/><rect x="18" y="4" width="3" height="16" rx="1"/></svg>
+      </button>
+      <button class="btn" id="eqBtn" data-i18n-title="tEq" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15c3 0 3-8 6-8s3 10 6 10 3-6 6-6"/></svg>
+        <span class="lbl" data-i18n="eq"></span>
+      </button>
+      <button class="btn icon" id="optsBtn" data-i18n-title="tOpts" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+      </button>
+    </div>
   </footer>
 
+  <div id="opts" class="pop" hidden>
+    <h3 data-i18n="oVari"></h3>
+    <div class="row">
+      <input id="st" type="range" min="-24" max="24" step="0.1" value="0">
+      <output id="stOut">0.0 st</output>
+      <button class="mini" id="stReset" data-i18n="oReset"></button>
+    </div>
+    <p class="note" data-i18n="oVariHint"></p>
+
+    <h3 data-i18n="oHits"></h3>
+    <div class="row">
+      <span data-i18n="oSens"></span>
+      <input id="sens" type="range" min="5" max="20" step="1" value="10">
+      <output id="sensOut"></output>
+    </div>
+
+    <h3 data-i18n="oExport"></h3>
+    <label class="chk"><input type="checkbox" id="snap"><span data-i18n="oSnap"></span></label>
+    <div class="row">
+      <span data-i18n="oFade"></span>
+      <select id="fade">
+        <option value="0" data-i18n="oFadeOff"></option>
+        <option value="2">2 ms</option><option value="5">5 ms</option><option value="10">10 ms</option><option value="20">20 ms</option>
+      </select>
+    </div>
+    <label class="chk"><input type="checkbox" id="applyFx"><span data-i18n="oApplyFx"></span></label>
+
+    <h3 data-i18n="oNaming"></h3>
+    <div class="seg" id="namingSeg">
+      <button id="nameOrig" data-i18n="oNameOrig"></button><button id="nameUcs" data-i18n="oNameUcs"></button>
+    </div>
+    <div id="ucsFields" hidden>
+      <div class="ucs">
+        <label><span data-i18n="oUcsCat"></span><input id="ucsCat" type="text" placeholder="WEAPGun" spellcheck="false"></label>
+        <label><span data-i18n="oUcsFx"></span><input id="ucsFx" type="text" placeholder="Pistol Shot" spellcheck="false"></label>
+        <label><span data-i18n="oUcsCreator"></span><input id="ucsCreator" type="text" placeholder="MG" spellcheck="false"></label>
+        <label><span data-i18n="oUcsSource"></span><input id="ucsSource" type="text" placeholder="GAME01" spellcheck="false"></label>
+      </div>
+      <code id="ucsPreview"></code>
+    </div>
+
+    <h3 data-i18n="oLang"></h3>
+    <div class="seg" id="langSeg"><button data-lang="es">Espa&ntilde;ol</button><button data-lang="en">English</button></div>
+
+    <div class="pop-actions">
+      <button class="btn small" id="setDefault" data-i18n="oDefault"></button>
+      <button class="btn small" id="openExports" data-i18n="oExports"></button>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
   <script src="audio-utils.js"></script>
+  <script src="eq.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

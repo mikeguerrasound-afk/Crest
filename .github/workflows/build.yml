@@ -10,7 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - { name: windows-x64, os: windows-latest, arch: x64, args: --win --x64 }
+          - { name: mac-arm64, os: macos-latest, arch: arm64, args: --mac --arm64 }
+          - { name: mac-x64, os: macos-latest, arch: x64, args: --mac --x64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -18,12 +21,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # ffmpeg-static downloads a binary for the arch given here
       - run: npm ci
+        env:
+          npm_config_arch: ${{ matrix.arch }}
       - run: npm test
-      - run: npx electron-builder --publish never
+        if: matrix.name != 'mac-x64'
+      - run: npx electron-builder ${{ matrix.args }} --publish never
       - uses: actions/upload-artifact@v4
         with:
-          name: crest-${{ matrix.os }}
+          name: crest-${{ matrix.name }}
           path: |
             dist/*.dmg
             dist/*.exe
