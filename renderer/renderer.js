@@ -21,7 +21,7 @@
     listRows: $('listRows'), listEmpty: $('listEmpty'),
     eqPanel: $('eqPanel'), eqCanvas: $('eqCanvas'), eqParams: $('eqParams'), eqBypass: $('eqBypass'), eqReset: $('eqReset'),
     eqOut: $('eqOut'), eqOutVal: $('eqOutVal'),
-    opts: $('opts'), viBtn: $('viBtn'), viLbl: $('viLbl'), viPop: $('viPop'), tabs: $('tabs'), tabList: $('tabList'), tabNew: $('tabNew'), st: $('st'), stOut: $('stOut'), stReset: $('stReset'), sens: $('sens'), sensOut: $('sensOut'),
+    opts: $('opts'), chStrip: $('chStrip'), viBtn: $('viBtn'), viLbl: $('viLbl'), viPop: $('viPop'), tabs: $('tabs'), tabList: $('tabList'), tabNew: $('tabNew'), st: $('st'), stOut: $('stOut'), stReset: $('stReset'), sens: $('sens'), sensOut: $('sensOut'),
     snap: $('snap'), fade: $('fade'), applyFx: $('applyFx'), nameOrig: $('nameOrig'), nameUcs: $('nameUcs'),
     ucsFields: $('ucsFields'), ucsCat: $('ucsCat'), ucsFx: $('ucsFx'), ucsCreator: $('ucsCreator'), ucsSource: $('ucsSource'),
     ucsPreview: $('ucsPreview'), langSeg: $('langSeg'), setDefault: $('setDefault'), openExports: $('openExports'),
@@ -99,7 +99,7 @@
 
   /* ---------- audio graph: media -> EQ -> volume -> analyser -> speakers ---------- */
 
-  const G = { ctx: null, src: null, chain: null, vol: null, analyser: null };
+  const G = { ctx: null, src: null, chain: null, vol: null, analyser: null, stage: null, nch: 0 };
 
   function ensureGraph() {
     if (G.ctx) return;
@@ -124,15 +124,118 @@
     if (!G.ctx) return;
     try {
       G.src.disconnect();
+      if (G.stage) {
+        G.stage.split.disconnect();
+        G.stage.merge.disconnect();
+        G.stage.gains.forEach((x) => x.disconnect());
+      }
       if (G.chain) G.chain.out.disconnect();
       G.vol.disconnect();
       G.analyser.disconnect();
     } catch {}
-    G.chain = EQ.buildChain(G.ctx, G.src, eqState);
+    // per-channel mute stage: src -> splitter -> gain[i] -> merger (only for 2+ channels)
+    const n = chanCount();
+    G.nch = n;
+    G.stage = null;
+    let head = G.src;
+    if (n >= 2 && n <= 32) {
+      const split = G.ctx.createChannelSplitter(n);
+      const merge = G.ctx.createChannelMerger(n);
+      const gains = [];
+      for (let i = 0; i < n; i++) {
+        const gn = G.ctx.createGain();
+        split.connect(gn, i, 0);
+        gn.connect(merge, 0, i);
+        gains.push(gn);
+      }
+      G.src.connect(split);
+      G.stage = { split, merge, gains };
+      head = merge;
+    }
+    // let multichannel files reach as many speakers as the device has (the rest is down-mixed by the browser)
+    try {
+      const d = G.ctx.destination;
+      d.channelCount = Math.max(1, Math.min(d.maxChannelCount || 2, Math.max(2, n)));
+      d.channelInterpretation = 'speakers';
+    } catch {}
+    G.chain = EQ.buildChain(G.ctx, head, eqState);
     G.chain.out.connect(G.vol);
     G.vol.connect(G.analyser);
     G.analyser.connect(G.ctx.destination);
+    applyMute();
   }
+
+  /* ---------- channels: layout labels, mute / solo ---------- */
+
+  const CH_LABELS = {
+    2: ['L', 'R'],
+    3: ['L', 'R', 'C'],
+    4: ['L', 'R', 'Ls', 'Rs'],
+    5: ['L', 'R', 'C', 'Ls', 'Rs'],
+    6: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
+    8: ['L', 'R', 'C', 'LFE', 'Lb', 'Rb', 'Ls', 'Rs'],
+  };
+  const chLabel = (n, i) => (CH_LABELS[n] && CH_LABELS[n][i]) || String(i + 1);
+  function chanCount() {
+    if (S.audio) return S.audio.channels.length;
+    const pa = S.info && S.info.probe && S.info.probe.audio;
+    return (pa && pa.channels) || 0;
+  }
+  const muteKey = () => Array.from({ length: chanCount() }, (_, k) => (S.mute[k] ? 1 : 0)).join('');
+  function applyMute() {
+    if (!G.ctx || !G.stage) return;
+    G.stage.gains.forEach((gn, i) => gn.gain.setTargetAtTime(S.mute[i] ? 0 : 1, G.ctx.currentTime, 0.008));
+  }
+  function refreshStrip() {
+    for (const b of el.chStrip.children) {
+      const off = !!S.mute[Number(b.dataset.i)];
+      b.classList.toggle('off', off);
+      b.setAttribute('aria-pressed', String(off));
+    }
+  }
+  function buildChStrip(n) {
+    el.chStrip.textContent = '';
+    el.chStrip.hidden = n < 2;
+    document.body.classList.toggle('multi', n >= 2);
+    for (let i = 0; n >= 2 && i < n; i++) {
+      const b = document.createElement('button');
+      b.className = 'ch';
+      b.dataset.i = String(i);
+      b.textContent = chLabel(n, i);
+      b.title = t('tChMute', { n: i + 1 });
+      el.chStrip.append(b);
+    }
+    refreshStrip();
+  }
+  function syncChannels() {
+    const n = chanCount();
+    if (G.ctx && n !== G.nch) rebuildChain();
+    else applyMute();
+    buildChStrip(n);
+  }
+  function toggleMute(i, solo) {
+    const n = chanCount();
+    if (n < 2 || i < 0 || i >= n) return;
+    if (solo) {
+      const alone = !S.mute[i] && Array.from({ length: n }, (_, k) => k).every((k) => k === i || S.mute[k]);
+      S.mute = alone ? [] : Array.from({ length: n }, (_, k) => k !== i);
+    } else {
+      S.mute[i] = !S.mute[i];
+    }
+    applyMute();
+    refreshStrip();
+    requestDraw();
+    schedulePrepare();
+  }
+  const silenceMuted = (chans) => {
+    chans.forEach((c, i) => { if (S.mute[i]) c.fill(0); });
+    return chans;
+  };
+  el.chStrip.addEventListener('pointerdown', (e) => e.stopPropagation());
+  el.chStrip.addEventListener('click', (e) => {
+    const b = e.target.closest('button.ch');
+    if (b) toggleMute(Number(b.dataset.i), e.altKey || e.shiftKey);
+  });
 
   function applyVolume() {
     const v = clamp(prefs.vol, 0, 1);
@@ -198,10 +301,12 @@
     Object.assign(S, {
       info, file: { path: info.path, name: info.name }, audio: null, pyr: null, peaks: [], peakIdx: -1, hits: [], hitSel: -1,
       sel: null, meterAll: null, prepared: null, clip: null, triedFallback: false, extract: null, ready: false, restore: opts.restore || null,
+      mute: (opts.restore && opts.restore.mute && opts.restore.mute.slice()) || [],
       fps: (info.probe && info.probe.video && info.probe.video.fps) || null,
     });
     el.media.removeAttribute('src'); // drop the previous picture right away
     el.media.load();
+    syncChannels();
     document.body.classList.remove('empty');
     document.body.classList.add('loaded');
     document.body.classList.toggle('has-video', info.kind === 'video');
@@ -309,6 +414,7 @@
       for (let i = 0; i < buf.numberOfChannels; i++) channels.push(buf.getChannelData(i));
       S.audio = { channels, sampleRate: buf.sampleRate, length: buf.length, duration: buf.duration };
       S.pyr = A.buildPyramid(channels, 256);
+      syncChannels();
       await tick();
       if (id !== S.loadId) return;
       S.peaks = A.findPeaks(channels, buf.sampleRate, 8, 0.3);
@@ -401,7 +507,8 @@
 
   function drawWave(dpr, w, h) {
     const chans = S.audio.channels;
-    const lanes = chans.length <= 2 ? chans.length : 1;
+    const perLane = chans.length <= 8;
+    const lanes = perLane ? chans.length : 1;
     const top = (RULER_H + 6) * dpr;
     const bottom = h - 8 * dpr;
     const laneH = (bottom - top) / lanes;
@@ -412,11 +519,12 @@
     for (let lane = 0; lane < lanes; lane++) {
       const mid = top + laneH * (lane + 0.5);
       const amp = laneH * 0.5 * 0.96;
-      const list = chans.length <= 2 ? [lane] : chans.map((_, i) => i);
+      const list = perLane ? [lane] : chans.map((_, i) => i);
       g.fillStyle = COLOR.grid;
       g.fillRect(0, Math.round(mid), w, line);
       const cols = A.columns(chans, S.pyr, list, s0, s1, w);
       g.fillStyle = COLOR.wave;
+      g.globalAlpha = perLane && S.mute[lane] ? 0.22 : 1;
       for (let x = 0; x < w; x++) {
         const mx = cols.max[x];
         const mn = cols.min[x];
@@ -425,6 +533,7 @@
         const y1 = mid - mn * amp;
         g.fillRect(x, y0, 1, Math.max(line, y1 - y0));
       }
+      g.globalAlpha = 1;
     }
   }
 
@@ -853,7 +962,7 @@
   }
 
   function renderChannelsSync(a, b) {
-    const chans = S.audio.channels.map((c) => c.slice(a, b));
+    const chans = silenceMuted(S.audio.channels.map((c) => c.slice(a, b)));
     A.applyFade(chans, S.audio.sampleRate, prefs.fade, prefs.fade);
     return chans;
   }
@@ -861,7 +970,7 @@
   // Cut, then (if asked) run through varispeed + EQ with the same graph the player uses.
   async function renderChannels(a, b) {
     const sr = S.audio.sampleRate;
-    let chans = S.audio.channels.map((c) => c.slice(a, b));
+    let chans = silenceMuted(S.audio.channels.map((c) => c.slice(a, b)));
     if (processingActive()) {
       const rate = A.semitoneRate(prefs.st);
       const inLen = chans[0].length;
@@ -905,7 +1014,7 @@
     return JSON.stringify([
       S.file.path, S.sel && +S.sel.start.toFixed(5), S.sel && +S.sel.end.toFixed(5), prefs.snap, prefs.fade,
       processingActive() ? [prefs.st, eqState.bands, eqState.out, eqState.bypass] : 0,
-      prefs.naming, prefs.naming === 'ucs' ? prefs.ucs : 0,
+      prefs.naming, prefs.naming === 'ucs' ? prefs.ucs : 0, muteKey(),
     ]);
   }
 
@@ -1122,6 +1231,7 @@
     if (tb && S.file) {
       tb.time = el.media.currentTime || 0;
       tb.sel = S.sel ? { start: S.sel.start, end: S.sel.end } : null;
+      tb.mute = S.mute.slice();
     }
   }
   function renderTabs() {
@@ -1180,7 +1290,7 @@
     }
     activeTab = id;
     renderTabs();
-    await loadFile(r.info, { restore: { time: tb.time, sel: tb.sel } });
+    await loadFile(r.info, { restore: { time: tb.time, sel: tb.sel, mute: tb.mute } });
   }
   function showEmpty() {
     S.loadId++;
@@ -1188,7 +1298,8 @@
     el.media.pause();
     el.media.removeAttribute('src');
     el.media.load();
-    Object.assign(S, { info: null, file: null, audio: null, pyr: null, peaks: [], hits: [], hitSel: -1, sel: null, prepared: null, clip: null, ready: false, restore: null, extract: null });
+    Object.assign(S, { info: null, file: null, audio: null, pyr: null, peaks: [], hits: [], hitSel: -1, sel: null, prepared: null, clip: null, ready: false, restore: null, extract: null, mute: [] });
+    syncChannels();
     document.body.classList.remove('loaded', 'has-video');
     document.body.classList.add('empty');
     el.title.textContent = 'Crest';
@@ -1539,6 +1650,10 @@
       if (e.key === 'Escape') e.target.blur();
       return;
     }
+    if (/^Digit[1-9]$/.test(e.code) && chanCount() >= 2) {
+      toggleMute(Number(e.code.slice(5)) - 1, e.shiftKey);
+      return;
+    }
     switch (e.key) {
       case ' ':
         e.preventDefault();
@@ -1643,6 +1758,6 @@
 
   // exposed only for the automated end-to-end test (main adds ?e2e=1 under CREST_E2E)
   if (new URLSearchParams(location.search).has('e2e')) {
-    window.__crest = { S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
+    window.__crest = { G, toggleMute, S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
   }
 })();

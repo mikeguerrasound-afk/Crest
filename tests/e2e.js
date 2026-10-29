@@ -66,6 +66,8 @@ const toneWav = path.join(media, '02 tone.wav');
   const s = new Float32Array(sr * 3).map((_, i) => 0.25 * Math.sin((2 * Math.PI * 1000 * i) / sr));
   fs.writeFileSync(toneWav, A.encodeWav([s, s], sr, 0, s.length));
 }
+const surround = path.join(media, '06 surround.wav');
+ff(['-f', 'lavfi', '-i', 'sine=frequency=440:duration=2:sample_rate=48000', '-af', 'pan=5.1|FL=c0|FR=0.5*c0|FC=0.25*c0|LFE=0.1*c0|BL=0.5*c0|BR=0.5*c0', '-c:a', 'pcm_s24le', surround]);
 const mp4 = path.join(media, '03 video.mp4');
 ff(['-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=25:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=4:sample_rate=48000', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', mp4]);
 const prores = path.join(media, '04 prores.mov');
@@ -333,7 +335,7 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
   await step('folder mode: list, filter, keyboard navigation with auto-play', async () => {
     await page.evaluate(async (d) => { await window.__crest.handleResolved(await window.api.resolve(d)); }, media);
     await page.waitForSelector('.row-file');
-    assert.strictEqual(await page.locator('.row-file').count(), 5);
+    assert.strictEqual(await page.locator('.row-file').count(), 6);
     await page.fill('#filter', 'tone');
     await sleep(150);
     assert.strictEqual(await page.locator('.row-file').count(), 1);
@@ -383,6 +385,38 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
     await page.locator('.tab.on .tab-x').click();
     await sleep(300);
     assert.strictEqual(await page.locator('.tab').count(), n - 1);
+  });
+
+  await step('multichannel: 5.1 lanes, per-channel mute / solo, applied to export', async () => {
+    await open(surround, { newTab: true });
+    await waitAudio();
+    assert.strictEqual(await S('S.audio.channels.length'), 6);
+    assert.strictEqual(await page.locator('#chStrip .ch').count(), 6);
+    assert.deepStrictEqual(await page.locator('#chStrip .ch').allTextContents(), ['L', 'R', 'C', 'LFE', 'Ls', 'Rs']);
+    await page.click('#play');
+    await sleep(300);
+    assert.strictEqual(await page.evaluate(() => window.__crest.G.stage.gains.length), 6);
+    await page.click('#chStrip .ch:nth-child(2)');
+    await sleep(250);
+    assert.ok(await page.evaluate(() => window.__crest.G.stage.gains[1].gain.value < 0.01));
+    assert.ok(await page.evaluate(() => window.__crest.G.stage.gains[0].gain.value > 0.99));
+    await page.click('#chStrip .ch:nth-child(3)', { modifiers: ['Shift'] });
+    await sleep(250);
+    assert.deepStrictEqual(await S('S.mute.map(Boolean)'), [true, true, false, true, true, true]);
+    await snap('11-multichannel');
+    await page.click('#play');
+    const r = await page.evaluate(async () => {
+      const c = window.__crest;
+      const ch = await c.renderChannels(1000, 5000);
+      const peak = (a) => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+      return ch.map(peak);
+    });
+    assert.ok(r[2] > 0.01 && r[0] === 0 && r[1] === 0 && r[3] === 0 && r[5] === 0, 'only the soloed centre survives export: ' + r);
+    await page.click('#chStrip .ch:nth-child(3)', { modifiers: ['Shift'] });
+    assert.deepStrictEqual(await S('S.mute.filter(Boolean).length'), 0);
+    await page.keyboard.press('Digit4');
+    assert.strictEqual(await S('!!S.mute[3]'), true);
+    await page.keyboard.press('Digit4');
   });
 
   await step('language switch re-renders the UI in Spanish', async () => {
