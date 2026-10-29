@@ -11,6 +11,11 @@
 <body class="empty">
   <header class="topbar"><span id="title">Crest</span></header>
 
+  <nav id="tabs" hidden>
+    <div id="tabList" role="tablist"></div>
+    <button id="tabNew" class="tab-new" data-i18n-title="tNewTab" aria-label="New tab">+</button>
+  </nav>
+
   <div id="layout">
     <aside id="side" hidden>
       <div class="side-head">
@@ -125,6 +130,10 @@
       <button class="btn icon" id="specBtn" data-i18n-title="tSpec" aria-pressed="false">
         <svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="14" width="3" height="6" rx="1"/><rect x="8" y="8" width="3" height="12" rx="1"/><rect x="13" y="11" width="3" height="9" rx="1"/><rect x="18" y="4" width="3" height="16" rx="1"/></svg>
       </button>
+      <button class="btn" id="viBtn" data-i18n-title="tVari" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/><circle cx="12" cy="18" r="1.2" fill="currentColor"/></svg>
+        <span class="lbl" id="viLbl" data-i18n="vari"></span>
+      </button>
       <button class="btn" id="eqBtn" data-i18n-title="tEq" aria-pressed="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15c3 0 3-8 6-8s3 10 6 10 3-6 6-6"/></svg>
         <span class="lbl" data-i18n="eq"></span>
@@ -135,7 +144,7 @@
     </div>
   </footer>
 
-  <div id="opts" class="pop" hidden>
+  <div id="viPop" class="pop pop-sm" hidden>
     <h3 data-i18n="oVari"></h3>
     <div class="row">
       <input id="st" type="range" min="-24" max="24" step="0.1" value="0">
@@ -143,7 +152,9 @@
       <button class="mini" id="stReset" data-i18n="oReset"></button>
     </div>
     <p class="note" data-i18n="oVariHint"></p>
+  </div>
 
+  <div id="opts" class="pop" hidden>
     <h3 data-i18n="oHits"></h3>
     <div class="row">
       <span data-i18n="oSens"></span>

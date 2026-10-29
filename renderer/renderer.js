@@ -21,7 +21,7 @@
     listRows: $('listRows'), listEmpty: $('listEmpty'),
     eqPanel: $('eqPanel'), eqCanvas: $('eqCanvas'), eqParams: $('eqParams'), eqBypass: $('eqBypass'), eqReset: $('eqReset'),
     eqOut: $('eqOut'), eqOutVal: $('eqOutVal'),
-    opts: $('opts'), st: $('st'), stOut: $('stOut'), stReset: $('stReset'), sens: $('sens'), sensOut: $('sensOut'),
+    opts: $('opts'), viBtn: $('viBtn'), viLbl: $('viLbl'), viPop: $('viPop'), tabs: $('tabs'), tabList: $('tabList'), tabNew: $('tabNew'), st: $('st'), stOut: $('stOut'), stReset: $('stReset'), sens: $('sens'), sensOut: $('sensOut'),
     snap: $('snap'), fade: $('fade'), applyFx: $('applyFx'), nameOrig: $('nameOrig'), nameUcs: $('nameUcs'),
     ucsFields: $('ucsFields'), ucsCat: $('ucsCat'), ucsFx: $('ucsFx'), ucsCreator: $('ucsCreator'), ucsSource: $('ucsSource'),
     ucsPreview: $('ucsPreview'), langSeg: $('langSeg'), setDefault: $('setDefault'), openExports: $('openExports'),
@@ -188,7 +188,7 @@
       return;
     }
     if (r.listed !== false && r.files) setFolder(r.dir, r.files);
-    await loadFile(r.info, opts);
+    await openInTab(r.info, opts);
   }
 
   async function loadFile(info, opts) {
@@ -197,7 +197,7 @@
     teardown();
     Object.assign(S, {
       info, file: { path: info.path, name: info.name }, audio: null, pyr: null, peaks: [], peakIdx: -1, hits: [], hitSel: -1,
-      sel: null, meterAll: null, prepared: null, clip: null, triedFallback: false, extract: null, ready: false,
+      sel: null, meterAll: null, prepared: null, clip: null, triedFallback: false, extract: null, ready: false, restore: opts.restore || null,
       fps: (info.probe && info.probe.video && info.probe.video.fps) || null,
     });
     el.media.removeAttribute('src'); // drop the previous picture right away
@@ -244,6 +244,18 @@
     el.media.src = url;
     applyRate();
     el.media.load();
+    if (S.restore && S.restore.time > 0) {
+      const t0 = S.restore.time;
+      el.media.addEventListener(
+        'loadedmetadata',
+        () => {
+          if (id !== S.loadId) return;
+          el.media.currentTime = Math.min(t0, (el.media.duration || t0) - 0.01);
+          updatePlayhead();
+        },
+        { once: true }
+      );
+    }
     if (opts && opts.autoplay) {
       el.media.addEventListener(
         'canplay',
@@ -307,6 +319,8 @@
       fitView();
       toast('');
       S.ready = true;
+      if (S.restore && S.restore.sel) setSel(S.restore.sel.start, S.restore.sel.end);
+      S.restore = null;
       updateMeter();
     } catch (err) {
       if (id !== S.loadId) return;
@@ -1069,9 +1083,9 @@
     if (top < el.list.scrollTop || top + ROW_H > el.list.scrollTop + el.list.clientHeight) el.list.scrollTop = Math.max(0, top - el.list.clientHeight / 2);
     renderRows();
   }
-  async function openFromList(f) {
+  async function openFromList(f, newTab) {
     const r = await api.resolve(f.path, { skipList: true });
-    if (r) handleResolved(r, { autoplay: true });
+    if (r) handleResolved(r, { autoplay: true, newTab: !!newTab });
   }
   function navigate(delta) {
     const shown = S.folder.shown;
@@ -1083,7 +1097,7 @@
   el.list.addEventListener('scroll', renderRows);
   el.listRows.addEventListener('click', (e) => {
     const row = e.target.closest('.row-file');
-    if (row) openFromList(S.folder.shown[Number(row.dataset.i)]);
+    if (row) openFromList(S.folder.shown[Number(row.dataset.i)], e.ctrlKey || e.metaKey);
   });
   el.filter.addEventListener('input', applyFilter);
   function setSidebar(on) {
@@ -1094,6 +1108,125 @@
     renderRows();
     scrollToActive();
   }
+
+
+  /* ---------- tabs ---------- */
+
+  const tabsList = [];
+  let activeTab = null;
+  let tabSeq = 0;
+  const tabById = (id) => tabsList.find((x) => x.id === id);
+
+  function saveTabState() {
+    const tb = tabById(activeTab);
+    if (tb && S.file) {
+      tb.time = el.media.currentTime || 0;
+      tb.sel = S.sel ? { start: S.sel.start, end: S.sel.end } : null;
+    }
+  }
+  function renderTabs() {
+    el.tabs.hidden = !tabsList.length;
+    document.body.classList.toggle('has-tabs', tabsList.length > 0);
+    el.tabList.textContent = '';
+    for (const tb of tabsList) {
+      const d = document.createElement('div');
+      d.className = 'tab' + (tb.id === activeTab ? ' on' : '');
+      d.dataset.id = String(tb.id);
+      d.setAttribute('role', 'tab');
+      d.title = tb.path;
+      const n = document.createElement('span');
+      n.className = 'tab-name';
+      n.textContent = tb.name;
+      const x = document.createElement('button');
+      x.className = 'tab-x';
+      x.textContent = '×';
+      x.title = t('tCloseTab');
+      x.dataset.close = String(tb.id);
+      d.append(n, x);
+      el.tabList.append(d);
+    }
+    const on = el.tabList.querySelector('.tab.on');
+    if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  async function openInTab(info, opts) {
+    opts = opts || {};
+    saveTabState();
+    const cur = tabById(activeTab);
+    let tb = tabsList.find((x) => x.path === info.path);
+    let restore = null;
+    if (tb) {
+      if (tb.id !== activeTab) restore = { time: tb.time, sel: tb.sel };
+    } else if (opts.newTab || !cur) {
+      tb = { id: ++tabSeq, path: info.path, name: info.name, time: 0, sel: null };
+      tabsList.push(tb);
+    } else {
+      tb = cur;
+      Object.assign(tb, { path: info.path, name: info.name, time: 0, sel: null });
+    }
+    activeTab = tb.id;
+    renderTabs();
+    await loadFile(info, Object.assign({}, opts, { restore }));
+  }
+  async function activateTab(id) {
+    if (id === activeTab) return;
+    const tb = tabById(id);
+    if (!tb) return;
+    saveTabState();
+    const r = await api.resolve(tb.path, { skipList: true });
+    if (!r || r.type !== 'file') {
+      toast(t('previewFail'), 4000);
+      closeTab(id);
+      return;
+    }
+    activeTab = id;
+    renderTabs();
+    await loadFile(r.info, { restore: { time: tb.time, sel: tb.sel } });
+  }
+  function showEmpty() {
+    S.loadId++;
+    teardown();
+    el.media.pause();
+    el.media.removeAttribute('src');
+    el.media.load();
+    Object.assign(S, { info: null, file: null, audio: null, pyr: null, peaks: [], hits: [], hitSel: -1, sel: null, prepared: null, clip: null, ready: false, restore: null, extract: null });
+    document.body.classList.remove('loaded', 'has-video');
+    document.body.classList.add('empty');
+    el.title.textContent = 'Crest';
+    document.title = 'Crest';
+    stageMsg('');
+    toast('');
+    updateSelInfo();
+    requestDraw();
+    renderRows();
+  }
+  function closeTab(id) {
+    if (id == null) id = activeTab;
+    const i = tabsList.findIndex((x) => x.id === id);
+    if (i < 0) return;
+    const wasActive = id === activeTab;
+    tabsList.splice(i, 1);
+    if (!wasActive) return renderTabs();
+    activeTab = null;
+    if (tabsList.length) activateTab(tabsList[Math.min(i, tabsList.length - 1)].id);
+    else showEmpty();
+    renderTabs();
+  }
+  function cycleTab(dir) {
+    if (tabsList.length < 2) return;
+    const i = tabsList.findIndex((x) => x.id === activeTab);
+    activateTab(tabsList[(i + dir + tabsList.length) % tabsList.length].id);
+  }
+  el.tabList.addEventListener('click', (e) => {
+    const x = e.target.closest('[data-close]');
+    if (x) return closeTab(Number(x.dataset.close));
+    const tb = e.target.closest('.tab');
+    if (tb) activateTab(Number(tb.dataset.id));
+  });
+  el.tabList.addEventListener('auxclick', (e) => {
+    const tb = e.target.closest('.tab');
+    if (e.button === 1 && tb) closeTab(Number(tb.dataset.id));
+  });
+  el.tabNew.addEventListener('click', () => chooseFile(true));
 
   /* ---------- EQ panel ---------- */
 
@@ -1166,7 +1299,10 @@
 
   function stLabel() {
     const r = A.semitoneRate(prefs.st);
-    el.stOut.textContent = `${prefs.st > 0 ? '+' : ''}${prefs.st.toFixed(1)} st · ${r.toFixed(2)}×`;
+    const lab = `${prefs.st > 0 ? '+' : ''}${prefs.st.toFixed(1)} st`;
+    el.stOut.textContent = `${lab} · ${r.toFixed(2)}×`;
+    el.viLbl.textContent = prefs.st === 0 ? t('vari') : lab;
+    el.viBtn.classList.toggle('active', prefs.st !== 0);
   }
   function updateUcsPreview() {
     el.ucsPreview.textContent = A.ucsName(prefs.ucs) + '.wav';
@@ -1195,17 +1331,35 @@
     el.specBtn.setAttribute('aria-pressed', String(prefs.spec));
   }
 
+  function toggleVi(force) {
+    const show = force != null ? force : el.viPop.hidden;
+    if (show) toggleOpts(false);
+    el.viPop.hidden = !show;
+    el.viBtn.setAttribute('aria-pressed', String(show));
+    if (show) {
+      const b = el.viBtn.getBoundingClientRect();
+      const w = el.viPop.offsetWidth || 280;
+      el.viPop.style.right = 'auto';
+      el.viPop.style.left = clamp(b.left + b.width / 2 - w / 2, 8, window.innerWidth - w - 8) + 'px';
+    }
+  }
   function toggleOpts(force) {
     const show = force != null ? force : el.opts.hidden;
+    if (show) toggleVi(false);
     el.opts.hidden = !show;
     el.optsBtn.setAttribute('aria-pressed', String(show));
   }
+  el.viBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleVi();
+  });
   el.optsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleOpts();
   });
   document.addEventListener('mousedown', (e) => {
     if (!el.opts.hidden && !el.opts.contains(e.target) && !el.optsBtn.contains(e.target)) toggleOpts(false);
+    if (!el.viPop.hidden && !el.viPop.contains(e.target) && !el.viBtn.contains(e.target)) toggleVi(false);
   });
 
   el.st.addEventListener('input', () => {
@@ -1287,8 +1441,8 @@
 
   /* ---------- buttons, keys, drop ---------- */
 
-  async function chooseFile() {
-    handleResolved(await api.openDialog());
+  async function chooseFile(newTab) {
+    handleResolved(await api.openDialog(), { newTab: newTab !== false });
   }
   async function chooseFolder() {
     handleResolved(await api.openFolderDialog());
@@ -1396,12 +1550,14 @@
       case 'l': case 'L': el.loop.click(); break;
       case 's': case 'S': el.specBtn.click(); break;
       case 'e': case 'E': setEqOpen(!prefs.eqOpen); break;
+      case 'v': case 'V': toggleVi(); break;
       case 'b': case 'B': el.folderBtn.click(); break;
       case 'f': case 'F': toggleFullscreen(); break;
       case ',': stepFrame(-1); break;
       case '.': stepFrame(1); break;
       case 'Escape':
         if (!el.opts.hidden) toggleOpts(false);
+        else if (!el.viPop.hidden) toggleVi(false);
         else clearSel();
         break;
       case 'z': case 'Z': zoomToSelection(); break;
@@ -1437,15 +1593,25 @@
     e.preventDefault();
     dropDepth = 0;
     document.body.classList.remove('dropping');
-    const f = e.dataTransfer && e.dataTransfer.files[0];
-    if (!f) return;
-    const p = api.pathForFile(f);
-    if (p) handleResolved(await api.resolve(p));
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (!files.length) return;
+    const paths = files.map((f) => api.pathForFile(f)).filter(Boolean);
+    if (paths[0]) await handleResolved(await api.resolve(paths[0]), { newTab: true });
+    // extra files become background tabs
+    for (const p of paths.slice(1)) {
+      const r = await api.resolve(p, { skipList: true });
+      if (r && r.type === 'file' && !tabsList.some((x) => x.path === r.info.path)) tabsList.push({ id: ++tabSeq, path: r.info.path, name: r.info.name, time: 0, sel: null });
+    }
+    renderTabs();
   });
 
-  api.onResolved((r) => handleResolved(r));
+  api.onResolved((r) => handleResolved(r, { newTab: true }));
   api.onMenu((name) => {
-    if (name === 'open') chooseFile();
+    if (name === 'open') chooseFile(true);
+    else if (name === 'new-tab') chooseFile(true);
+    else if (name === 'close-tab') closeTab();
+    else if (name === 'next-tab') cycleTab(1);
+    else if (name === 'prev-tab') cycleTab(-1);
     else if (name === 'open-folder') chooseFolder();
     else if (name === 'export') exportSelection();
     else if (name === 'export-hits') exportAllHits();

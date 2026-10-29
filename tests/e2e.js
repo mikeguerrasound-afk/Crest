@@ -348,6 +348,43 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
     await snap('07-folder');
   });
 
+  await step('varispeed button opens its own popover and shows the active value', async () => {
+    await page.click('#viBtn');
+    assert.ok(await page.isVisible('#viPop'));
+    assert.ok(!(await page.isVisible('#opts')));
+    await page.fill('#st', '5');
+    await page.dispatchEvent('#st', 'input');
+    await sleep(150);
+    assert.ok(/\+5\.0 st/.test(await page.textContent('#viLbl')));
+    assert.ok(await page.evaluate(() => document.getElementById('viBtn').classList.contains('active')));
+    await snap('09-varispeed');
+    await page.click('#stReset');
+    assert.strictEqual((await page.textContent('#viLbl')).trim(), 'Vari');
+    await page.keyboard.press('Escape');
+    assert.ok(!(await page.isVisible('#viPop')));
+  });
+
+  await step('tabs: open several files, switch keeping position, close', async () => {
+    await open(toneWav, { newTab: true });
+    await waitAudio();
+    await open(wmaFile, { newTab: true });
+    await waitAudio();
+    assert.strictEqual(await page.locator('.tab').count() >= 2, true);
+    const n = await page.locator('.tab').count();
+    await page.evaluate(() => { document.getElementById('media').currentTime = 0.5; });
+    await sleep(200);
+    await page.locator('.tab').first().click();
+    await waitAudio();
+    await sleep(300);
+    await page.locator('.tab').last().click();
+    await waitAudio();
+    await page.waitForFunction(() => Math.abs(document.getElementById('media').currentTime - 0.5) < 0.1, null, { timeout: 5000 });
+    await snap('10-tabs');
+    await page.locator('.tab.on .tab-x').click();
+    await sleep(300);
+    assert.strictEqual(await page.locator('.tab').count(), n - 1);
+  });
+
   await step('language switch re-renders the UI in Spanish', async () => {
     await page.click('#optsBtn');
     await page.click('#langSeg button[data-lang="es"]');

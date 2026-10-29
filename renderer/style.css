@@ -29,7 +29,7 @@ html, body {
 
 body {
   display: grid;
-  grid-template-rows: 40px minmax(0, 1fr) auto;
+  grid-template-rows: 40px auto minmax(0, 1fr) auto;
 }
 
 /* ---------- top bar ---------- */
@@ -471,3 +471,22 @@ body:not(.loaded) .bar .grip { opacity: 0.4; pointer-events: none; }
 
 @media (max-width: 1060px) { .btn .lbl { display: none; } #loudest { padding: 0 9px; } .btn:not(.icon):not(.primary) { padding: 0 9px; } }
 @media (max-width: 900px) { .time { min-width: 0; } .vol input { width: 56px; } }
+
+/* ---------- tabs ---------- */
+#tabs { display: flex; align-items: center; gap: 4px; padding: 0 16px 8px; min-width: 0; }
+#tabs[hidden] { display: none; }
+#tabList { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+#tabList::-webkit-scrollbar { display: none; }
+.tab {
+  display: flex; align-items: center; gap: 6px; flex: 0 1 180px; min-width: 90px; height: 28px; padding: 0 6px 0 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.on { color: var(--text); background: var(--panel-2); border-color: rgba(255, 180, 84, 0.45); }
+.tab .tab-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .tab-x { width: 18px; height: 18px; border: 0; border-radius: 5px; background: transparent; color: inherit; font-size: 14px; line-height: 1; cursor: pointer; opacity: 0.6; }
+.tab .tab-x:hover { opacity: 1; background: rgba(255, 255, 255, 0.1); }
+.tab-new { width: 28px; height: 28px; flex: none; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); font-size: 16px; cursor: pointer; }
+.tab-new:hover { color: var(--text); }
+.pop-sm { width: 280px; right: 180px; }
+#viBtn.active:not([aria-pressed="true"]) { color: var(--accent); }

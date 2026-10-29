@@ -53,6 +53,7 @@ const lang = () => loadSettings().lang || (String(app.getLocale()).toLowerCase()
 const T = {
   en: {
     file: 'File', view: 'View', help: 'Help',
+    newTab: 'New Tab', closeTab: 'Close Tab', nextTab: 'Next Tab', prevTab: 'Previous Tab',
     open: 'Open…', openFolder: 'Open Folder…', exportSel: 'Export Selection as WAV…',
     exportHits: 'Export All Hits as Files…', openExports: 'Open Exports Folder', setDefault: 'Use Crest as Default Player…',
     licenses: 'Third-Party Licenses',
@@ -70,6 +71,7 @@ const T = {
   },
   es: {
     file: 'Archivo', view: 'Ver', help: 'Ayuda',
+    newTab: 'Nueva pestaña', closeTab: 'Cerrar pestaña', nextTab: 'Pestaña siguiente', prevTab: 'Pestaña anterior',
     open: 'Abrir…', openFolder: 'Abrir carpeta…', exportSel: 'Exportar selección como WAV…',
     exportHits: 'Exportar todos los golpes como archivos…', openExports: 'Abrir carpeta de exportaciones', setDefault: 'Usar Crest como reproductor predeterminado…',
     licenses: 'Licencias de terceros',
@@ -355,6 +357,7 @@ function buildMenu() {
     {
       label: tr('file'),
       submenu: [
+        { label: tr('newTab'), accelerator: 'CmdOrCtrl+T', click: act('new-tab') },
         { label: tr('open'), accelerator: 'CmdOrCtrl+O', click: act('open') },
         { label: tr('openFolder'), accelerator: 'CmdOrCtrl+Shift+O', click: act('open-folder') },
         { type: 'separator' },
@@ -364,10 +367,15 @@ function buildMenu() {
         { type: 'separator' },
         { label: tr('setDefault'), click: () => askDefault(true).catch(() => {}) },
         { type: 'separator' },
-        isMac ? { role: 'close' } : { role: 'quit' },
+        { label: tr('closeTab'), accelerator: 'CmdOrCtrl+W', click: act('close-tab') },
+        ...(isMac ? [] : [{ role: 'quit' }]),
       ],
     },
-    { label: tr('view'), submenu: [{ role: 'togglefullscreen' }, ...(app.isPackaged ? [] : [{ role: 'toggleDevTools' }])] },
+    { label: tr('view'), submenu: [
+      { label: tr('nextTab'), accelerator: 'Ctrl+Tab', click: act('next-tab') },
+      { label: tr('prevTab'), accelerator: 'Ctrl+Shift+Tab', click: act('prev-tab') },
+      { type: 'separator' },
+      { role: 'togglefullscreen' }, ...(app.isPackaged ? [] : [{ role: 'toggleDevTools' }])] },
     { role: 'windowMenu' },
     {
       label: tr('help'),

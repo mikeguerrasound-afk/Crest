@@ -8,7 +8,8 @@ Click to seek, jump to the loudest part, select a region and drag it into your D
 - Folder audition: open a folder, filter, move with Up/Down.
 - Hit detection and batch slice export (Ctrl/Cmd+Shift+E); click-free export (zero-crossing snap, fades); optional UCS naming.
 - Spectrogram view, selection meter (peak, RMS, LUFS).
-- Varispeed (±24 semitones), applied to exports.
+- Varispeed (±24 semitones) from the "Vari" button (V), applied to exports.
+- Tabs: Ctrl/Cmd+T new tab, Ctrl/Cmd+W close, Ctrl+Tab switch; each tab keeps its position. Ctrl/Cmd+click a file in the list opens it in a new tab.
 - Parametric EQ with live analyzer (original design), applied to exports.
 - Video: ProRes, DNxHD, HEVC, AVI and more via ffmpeg preview proxy; frame stepping (`,` `.`) with timecode; drag a selection out as a video clip.
 - English / Spanish interface.
