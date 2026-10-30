@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   chooseExportDir: () => ipcRenderer.invoke('export:choose-dir'),
   writeTo: (dir, name, bytes) => ipcRenderer.invoke('export:write-to', dir, name, bytes),
   saveAs: (name, bytes) => ipcRenderer.invoke('export:save-as', name, bytes),
+  exportAs: (name, bytes, fmt, channels, dir) => ipcRenderer.invoke('export:convert', name, bytes, fmt, channels, dir),
   reveal: (p) => ipcRenderer.send('export:reveal', p),
   openExportsDir: () => ipcRenderer.send('export:open-dir'),
   startDrag: (filePath) => ipcRenderer.send('drag:start', filePath),

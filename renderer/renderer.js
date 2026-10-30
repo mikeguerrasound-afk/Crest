@@ -13,7 +13,7 @@
     wave: $('wave'), canvas: $('canvas'), playhead: $('playhead'), selection: $('selection'),
     status: $('status'), meter: $('meter'), fx: $('fx'), title: $('title'),
     play: $('play'), timeBtn: $('timeBtn'), cur: $('cur'), dur: $('dur'),
-    loudest: $('loudest'), prevHit: $('prevHit'), nextHit: $('nextHit'), loop: $('loop'), vol: $('vol'),
+    exportBtn: $('exportBtn'), exPop: $('exPop'), exFmt: $('exFmt'), exScope: $('exScope'), exFxNote: $('exFxNote'), exGo: $('exGo'), prevHit: $('prevHit'), nextHit: $('nextHit'), loop: $('loop'), vol: $('vol'),
     grip: $('grip'), gripText: $('gripText'), gripVideo: $('gripVideo'), gripVideoText: $('gripVideoText'),
     folderBtn: $('folderBtn'), open: $('open'), specBtn: $('specBtn'), eqBtn: $('eqBtn'), optsBtn: $('optsBtn'),
     openBig: $('openBig'), openFolderBig: $('openFolderBig'),
@@ -39,7 +39,7 @@
   const DEF = {
     st: 0, sens: 10, snap: true, fade: 2, applyFx: true, naming: 'orig',
     ucs: { catId: '', fxName: '', creatorId: '', sourceId: '' },
-    eq: null, vol: 1, sidebar: false, spec: false, tc: false, waveH: 210, eqOpen: false, lang: null,
+    exFmt: 'wav24', eq: null, vol: 1, sidebar: false, spec: false, tc: false, waveH: 210, eqOpen: false, lang: null,
   };
   let prefs = Object.assign({}, DEF, { ucs: Object.assign({}, DEF.ucs) });
   try {
@@ -417,9 +417,6 @@
       syncChannels();
       await tick();
       if (id !== S.loadId) return;
-      S.peaks = A.findPeaks(channels, buf.sampleRate, 8, 0.3);
-      await tick();
-      if (id !== S.loadId) return;
       S.hits = A.detectHits(channels, buf.sampleRate, { riseDb: prefs.sens });
       el.dur.textContent = fmtT(buf.duration);
       fitView();
@@ -635,15 +632,6 @@
     if (prefs.spec) drawSpectrogram(dpr, w);
     else drawWave(dpr, w, h);
     drawHitMarks(dpr);
-    if (S.peakIdx >= 0 && S.peaks[S.peakIdx]) {
-      const x = Math.round(t2x(S.peaks[S.peakIdx].sample / S.audio.sampleRate) * dpr);
-      if (x >= 0 && x <= w) {
-        g.fillStyle = COLOR.accent;
-        g.globalAlpha = 0.35;
-        g.fillRect(x, Math.round(RULER_H * dpr), Math.max(1, Math.round(dpr)), h);
-        g.globalAlpha = 1;
-      }
-    }
   }
 
   function updatePlayhead() {
@@ -834,19 +822,7 @@
     }
   });
 
-  /* ---------- loudest part and hits ---------- */
-
-  function jumpToLoudest() {
-    if (!S.audio) return toast(t('noWave'));
-    if (!S.peaks.length) return toast(t('silent'));
-    S.peakIdx = (S.peakIdx + 1) % S.peaks.length;
-    const p = S.peaks[S.peakIdx];
-    const tm = p.sample / S.audio.sampleRate;
-    if (S.sel && (tm < S.sel.start || tm > S.sel.end)) clearSel();
-    seek(tm, true);
-    requestDraw();
-    toast(t('peakN', { n: S.peakIdx + 1, m: S.peaks.length, db: (20 * Math.log10(p.amp)).toFixed(1) }));
-  }
+  /* ---------- hits ---------- */
 
   function selectHit(i) {
     const h = S.hits[i];
@@ -968,7 +944,7 @@
   }
 
   // Cut, then (if asked) run through varispeed + EQ with the same graph the player uses.
-  async function renderChannels(a, b) {
+  async function renderChannels(a, b, noFade) {
     const sr = S.audio.sampleRate;
     let chans = silenceMuted(S.audio.channels.map((c) => c.slice(a, b)));
     if (processingActive()) {
@@ -988,7 +964,7 @@
       chans = [];
       for (let i = 0; i < rendered.numberOfChannels; i++) chans.push(rendered.getChannelData(i).slice());
     }
-    A.applyFade(chans, sr, prefs.fade, prefs.fade);
+    if (!noFade) A.applyFade(chans, sr, prefs.fade, prefs.fade);
     return chans;
   }
 
@@ -1114,15 +1090,29 @@
     else toast(t('writeFail'));
   });
 
-  async function exportSelection() {
-    if (!S.audio || !S.sel) return toast(t('selectFirst'));
-    const [a, b] = snappedRegion(S.sel.start, S.sel.end);
-    const chans = await renderChannels(a, b);
-    const saved = await api.saveAs(exportName(a, b), A.encodeWav(chans, S.audio.sampleRate));
-    if (saved) toast(t('saved'));
+  let exporting = false;
+  // Exports the selection (snapped, faded) or, with nothing selected, the whole file, in the chosen format.
+  async function exportCurrent() {
+    if (!S.audio) return toast(t('noWave'));
+    if (exporting) return;
+    const sr = S.audio.sampleRate;
+    const whole = !S.sel;
+    const [a, b] = whole ? [0, S.audio.length] : snappedRegion(S.sel.start, S.sel.end);
+    exporting = true;
+    try {
+      toast(t('exporting'), 0);
+      const chans = await renderChannels(a, b, whole);
+      const name = whole ? baseName(S.file.name) + fxSuffix() + '.wav' : exportName(a, b);
+      const saved = await api.exportAs(name, A.encodeWav(chans, sr), prefs.exFmt, chans.length);
+      toast(saved ? t('saved') : '');
+    } catch (err) {
+      console.error(err);
+      toast(t('writeFail'));
+    } finally {
+      exporting = false;
+    }
   }
 
-  let exporting = false;
   async function exportAllHits() {
     if (!S.audio) return toast(t('noWave'));
     if (!S.hits.length) return toast(t('noHits'));
@@ -1137,7 +1127,7 @@
         const sr = S.audio.sampleRate;
         const [a, b] = snappedRegion(S.hits[i].start / sr, S.hits[i].end / sr);
         const chans = await renderChannels(a, b);
-        last = await api.writeTo(dir, exportName(a, b, i + 1), A.encodeWav(chans, sr));
+        last = await api.exportAs(exportName(a, b, i + 1), A.encodeWav(chans, sr), prefs.exFmt, chans.length, dir);
         await tick();
       }
       toast(t('savedN', { n: S.hits.length }), 3500);
@@ -1442,9 +1432,31 @@
     el.specBtn.setAttribute('aria-pressed', String(prefs.spec));
   }
 
+  const EX_FORMATS = [['wav24', 'WAV 24-bit'], ['wav16', 'WAV 16-bit'], ['aiff', 'AIFF 24-bit'], ['flac', 'FLAC'], ['mp3_320', 'MP3 320 kbps'], ['mp3_v0', 'MP3 V0 (VBR)'], ['ogg', 'OGG Vorbis'], ['m4a', 'AAC (.m4a)']];
+  for (const [v, label] of EX_FORMATS) el.exFmt.append(new Option(label, v));
+  function toggleEx(force) {
+    const show = force != null ? force : el.exPop.hidden;
+    if (show) { toggleOpts(false); toggleVi(false); }
+    el.exPop.hidden = !show;
+    el.exportBtn.setAttribute('aria-pressed', String(show));
+    if (!show) return;
+    el.exFmt.value = prefs.exFmt;
+    el.exScope.textContent = S.sel
+      ? t('exScopeSel', { a: fmtT(S.sel.start), b: fmtT(S.sel.end) })
+      : t('exScopeAll');
+    el.exFxNote.textContent = processingActive() || S.mute.some(Boolean) ? t('exFxNote') : '';
+    const b = el.exportBtn.getBoundingClientRect();
+    const w = el.exPop.offsetWidth || 280;
+    el.exPop.style.right = 'auto';
+    el.exPop.style.left = clamp(b.left + b.width / 2 - w / 2, 8, window.innerWidth - w - 8) + 'px';
+  }
+  el.exportBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleEx(); });
+  el.exFmt.addEventListener('change', () => { prefs.exFmt = el.exFmt.value; savePrefs(); });
+  el.exGo.addEventListener('click', () => { toggleEx(false); exportCurrent(); });
+
   function toggleVi(force) {
     const show = force != null ? force : el.viPop.hidden;
-    if (show) toggleOpts(false);
+    if (show) { toggleOpts(false); toggleEx(false); }
     el.viPop.hidden = !show;
     el.viBtn.setAttribute('aria-pressed', String(show));
     if (show) {
@@ -1456,7 +1468,7 @@
   }
   function toggleOpts(force) {
     const show = force != null ? force : el.opts.hidden;
-    if (show) toggleVi(false);
+    if (show) { toggleVi(false); toggleEx(false); }
     el.opts.hidden = !show;
     el.optsBtn.setAttribute('aria-pressed', String(show));
   }
@@ -1471,6 +1483,7 @@
   document.addEventListener('mousedown', (e) => {
     if (!el.opts.hidden && !el.opts.contains(e.target) && !el.optsBtn.contains(e.target)) toggleOpts(false);
     if (!el.viPop.hidden && !el.viPop.contains(e.target) && !el.viBtn.contains(e.target)) toggleVi(false);
+    if (!el.exPop.hidden && !el.exPop.contains(e.target) && !el.exportBtn.contains(e.target)) toggleEx(false);
   });
 
   el.st.addEventListener('input', () => {
@@ -1560,7 +1573,6 @@
   }
 
   el.play.addEventListener('click', () => togglePlay());
-  el.loudest.addEventListener('click', jumpToLoudest);
   el.prevHit.addEventListener('click', () => gotoHit(-1));
   el.nextHit.addEventListener('click', () => gotoHit(1));
   el.open.addEventListener('click', chooseFile);
@@ -1659,7 +1671,6 @@
         e.preventDefault();
         togglePlay();
         break;
-      case 'p': case 'P': jumpToLoudest(); break;
       case ']': gotoHit(1); break;
       case '[': gotoHit(-1); break;
       case 'l': case 'L': el.loop.click(); break;
@@ -1673,6 +1684,7 @@
       case 'Escape':
         if (!el.opts.hidden) toggleOpts(false);
         else if (!el.viPop.hidden) toggleVi(false);
+        else if (!el.exPop.hidden) toggleEx(false);
         else clearSel();
         break;
       case 'z': case 'Z': zoomToSelection(); break;
@@ -1728,7 +1740,7 @@
     else if (name === 'next-tab') cycleTab(1);
     else if (name === 'prev-tab') cycleTab(-1);
     else if (name === 'open-folder') chooseFolder();
-    else if (name === 'export') exportSelection();
+    else if (name === 'export') exportCurrent();
     else if (name === 'export-hits') exportAllHits();
   });
   api.onProgress(({ kind, pct }) => {
@@ -1758,6 +1770,7 @@
 
   // exposed only for the automated end-to-end test (main adds ?e2e=1 under CREST_E2E)
   if (new URLSearchParams(location.search).has('e2e')) {
-    window.__crest = { G, toggleMute, S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
+    window.A_encode = A.encodeWav;
+    window.__crest = { exportCurrent, G, toggleMute, S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
   }
 })();

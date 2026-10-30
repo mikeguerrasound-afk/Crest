@@ -510,6 +510,39 @@ ipcMain.handle('export:write-to', async (_e, dir, name, bytes) => {
   return p;
 });
 
+// Writes `bytes` (a 24-bit WAV) in the requested format, to a chosen folder (dir) or through a Save dialog.
+ipcMain.handle('export:convert', async (_e, name, bytes, fmt, channels, dir) => {
+  const f = M.EXPORT_FORMATS[fmt];
+  if (!f) throw new Error('unknown format');
+  const outName = safeName(String(name).replace(/\.(wav|wave)$/i, '')) + '.' + f.ext;
+  let target;
+  if (dir) {
+    dir = norm(dir);
+    if (!exportDirsChosen.has(dir)) throw new Error('folder not chosen');
+    target = path.join(dir, outName);
+  } else {
+    const res = await dialog.showSaveDialog(win, {
+      defaultPath: path.join(exportsDir(), outName),
+      filters: [{ name: f.label, extensions: [f.ext] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    target = res.filePath;
+  }
+  if (!f.args) {
+    await fs.promises.writeFile(target, toBuffer(bytes));
+    return target;
+  }
+  fs.mkdirSync(cacheDir(), { recursive: true });
+  const tmp = path.join(cacheDir(), `export-${process.pid}-${Date.now()}.wav`);
+  await fs.promises.writeFile(tmp, toBuffer(bytes));
+  try {
+    await runFfmpeg(M.exportArgs(fmt, tmp, target, channels || 2), { kind: 'export' });
+  } finally {
+    fs.promises.unlink(tmp).catch(() => {});
+  }
+  return target;
+});
+
 ipcMain.handle('export:save-as', async (_e, name, bytes) => {
   const res = await dialog.showSaveDialog(win, {
     defaultPath: path.join(exportsDir(), safeName(name)),

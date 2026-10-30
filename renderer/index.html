@@ -92,10 +92,6 @@
     <button class="time" id="timeBtn" data-i18n-title="tTime"><span id="cur">0:00.000</span><span class="sep">/</span><span id="dur">0:00.000</span></button>
 
     <div class="grp">
-      <button class="btn" id="loudest" data-i18n-title="tLoudest">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2.5-7 4 14 3-9 1.5 2h5"/></svg>
-        <span class="lbl" data-i18n="loudest"></span>
-      </button>
       <button class="btn icon" id="prevHit" data-i18n-title="tPrevHit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
       <button class="btn icon" id="nextHit" data-i18n-title="tNextHit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button>
     </div>
@@ -124,6 +120,10 @@
       <button class="btn icon" id="folderBtn" data-i18n-title="tFolder">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       </button>
+      <button class="btn" id="exportBtn" data-i18n-title="tExport" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
+        <span class="lbl" data-i18n="export"></span>
+      </button>
       <button class="btn" id="open" data-i18n-title="tOpen">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
         <span class="lbl" data-i18n="open"></span>
@@ -144,6 +144,15 @@
       </button>
     </div>
   </footer>
+
+  <div id="exPop" class="pop pop-sm" hidden>
+    <h3 data-i18n="exTitle"></h3>
+    <div class="row"><span data-i18n="exFormat"></span><select id="exFmt"></select></div>
+    <p class="note" id="exScope"></p>
+    <p class="note" id="exFxNote"></p>
+    <div class="pop-actions"><button class="btn primary small" id="exGo" data-i18n="exGo"></button></div>
+    <p class="note" data-i18n="exHint"></p>
+  </div>
 
   <div id="viPop" class="pop pop-sm" hidden>
     <h3 data-i18n="oVari"></h3>

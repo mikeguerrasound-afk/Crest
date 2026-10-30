@@ -277,4 +277,13 @@ if (!ffAvailable) {
   });
 }
 
+test('export formats: ffmpeg args per format, stereo-only formats are down-mixed', () => {
+  assert.strictEqual(M.exportArgs('wav24', 'a.wav', 'b.wav', 2), null);
+  assert.strictEqual(M.exportArgs('nope', 'a.wav', 'b.wav', 2), null);
+  const mp3 = M.exportArgs('mp3_320', 'a.wav', 'b.mp3', 6);
+  assert.ok(mp3.includes('libmp3lame') && mp3.join(' ').includes('-ac 2') && mp3[mp3.length - 1] === 'b.mp3');
+  assert.ok(!M.exportArgs('flac', 'a.wav', 'b.flac', 6).includes('-ac'));
+  for (const k of Object.keys(M.EXPORT_FORMATS)) assert.ok(M.EXPORT_FORMATS[k].ext && M.EXPORT_FORMATS[k].label);
+});
+
 console.log(`\n${passed} feature tests passed`);

@@ -115,7 +115,7 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
   await step('opens a WAV: waveform decoded at native rate, hits detected', async () => {
     await open(hitsWav);
     await waitAudio();
-    const r = await S('({ sr: S.audio.sampleRate, ch: S.audio.channels.length, dur: S.audio.duration, hits: S.hits.map(h => h.start / S.audio.sampleRate), peaks: S.peaks.length, plan: S.info.plan, kind: S.info.kind })');
+    const r = await S('({ sr: S.audio.sampleRate, ch: S.audio.channels.length, dur: S.audio.duration, hits: S.hits.map(h => h.start / S.audio.sampleRate), plan: S.info.plan, kind: S.info.kind })');
     assert.strictEqual(r.sr, 48000);
     assert.strictEqual(r.ch, 2);
     near(r.dur, 6, 0.01);
@@ -151,13 +151,6 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
     await page.click('#play');
     const seeked = await S('document.getElementById("media").currentTime');
     assert.ok(seeked > 2.3, 'seek landed: ' + seeked);
-  });
-
-  await step('Loudest jumps to the 2.4 s hit first, then the next ones', async () => {
-    await page.click('#loudest');
-    near(await S('document.getElementById("media").currentTime'), 2.4, 0.02);
-    await page.click('#loudest');
-    near(await S('document.getElementById("media").currentTime'), 4.8, 0.03);
   });
 
   await step('hit navigation selects each hit; selection drag-out writes a click-free WAV', async () => {
@@ -419,12 +412,48 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
     await page.keyboard.press('Digit4');
   });
 
+  await step('export button: formats WAV/AIFF/FLAC/MP3/OGG/AAC really encode; no selection exports the whole file', async () => {
+    await open(hitsWav);
+    await waitAudio();
+    await page.click('#exportBtn');
+    assert.ok(await page.isVisible('#exPop'));
+    assert.ok(/whole file/.test(await page.textContent('#exScope')));
+    const opts = await page.locator('#exFmt option').allTextContents();
+    assert.ok(opts.includes('FLAC') && opts.some((o) => /MP3/.test(o)));
+    await page.selectOption('#exFmt', 'flac');
+    await snap('12-export');
+    await page.keyboard.press('Escape');
+    assert.ok(!(await page.isVisible('#exPop')));
+    const outDir = path.join(work, 'fmt');
+    fs.mkdirSync(outDir, { recursive: true });
+    await page.evaluate(async () => { await window.api.chooseExportDir(); });
+    const res = {};
+    for (const fmt of ['wav24', 'wav16', 'aiff', 'flac', 'mp3_320', 'mp3_v0', 'ogg', 'm4a']) {
+      res[fmt] = await page.evaluate(async ([f, dir]) => {
+        const c = window.__crest;
+        const chans = await c.renderChannels(0, c.S.audio.length, true);
+        const bytes = window.A_encode(chans, c.S.audio.sampleRate);
+        return window.api.exportAs('fmt-' + f + '.wav', bytes, f, chans.length, dir);
+      }, [fmt, batchDir]);
+    }
+    const probe = (f) => spawnSync(FF, ['-hide_banner', '-i', f], { encoding: 'utf8' }).stderr;
+    const expect = { wav24: ['pcm_s24le'], wav16: ['pcm_s16le'], aiff: ['pcm_s24be'], flac: ['flac'], mp3_320: ['mp3'], mp3_v0: ['mp3'], ogg: ['vorbis'], m4a: ['aac'] };
+    for (const [fmt, codecs] of Object.entries(expect)) {
+      assert.ok(res[fmt] && fs.existsSync(res[fmt]), fmt + ' file missing');
+      const info = probe(res[fmt]);
+      assert.ok(codecs.some((c) => info.includes(c)), fmt + ': ' + info.split('\n').filter((l) => /Audio:|Duration/.test(l)).join(' | '));
+      const m = /Duration: (\d+):(\d+):([\d.]+)/.exec(info);
+      near(+m[1] * 3600 + +m[2] * 60 + +m[3], 6, 0.15, fmt + ' duration');
+    }
+    assert.ok(/\.flac$/.test(res.flac) && /\.mp3$/.test(res.mp3_v0) && /\.m4a$/.test(res.m4a));
+  });
+
   await step('language switch re-renders the UI in Spanish', async () => {
     await page.click('#optsBtn');
     await page.click('#langSeg button[data-lang="es"]');
     await sleep(200);
     assert.strictEqual(await page.getAttribute('#play', 'title'), 'Reproducir / pausa (Espacio)');
-    assert.ok(/Más fuerte/.test(await page.textContent('#loudest')));
+    assert.ok(/Exportar/.test(await page.textContent('#exportBtn')));
     await snap('08-spanish');
     await page.click('#langSeg button[data-lang="en"]');
     await page.keyboard.press('Escape');
