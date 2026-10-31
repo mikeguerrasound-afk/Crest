@@ -27,6 +27,15 @@ contextBridge.exposeInMainWorld('api', {
   openExportsDir: () => ipcRenderer.send('export:open-dir'),
   startDrag: (filePath) => ipcRenderer.send('drag:start', filePath),
 
+  // tools
+  pickVideo: () => ipcRenderer.invoke('dialog:pick-video'),
+  readMeta: (p) => ipcRenderer.invoke('meta:read', p),
+  writeMeta: (p, tags) => ipcRenderer.invoke('meta:write', p, tags),
+  scanMeta: (paths) => ipcRenderer.invoke('meta:scan', paths),
+  onMeta: (cb) => ipcRenderer.on('meta:update', (_e, list) => cb(list)),
+  exportPicture: (video, start, duration, bytes, name) => ipcRenderer.invoke('pic:export', video, start, duration, bytes, name),
+  sendReaper: (name, bytes) => ipcRenderer.invoke('reaper:send', name, bytes),
+
   // app
   setLang: (l) => ipcRenderer.send('lang:set', l),
   getLang: () => ipcRenderer.invoke('lang:get'),

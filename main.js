@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const M = require('./lib/media');
+const R = require('./lib/reaper');
+const os = require('os');
 
 const isMac = process.platform === 'darwin';
 const isWin = process.platform === 'win32';
@@ -520,6 +522,8 @@ ipcMain.handle('export:convert', async (_e, name, bytes, fmt, channels, dir) => 
     dir = norm(dir);
     if (!exportDirsChosen.has(dir)) throw new Error('folder not chosen');
     target = path.join(dir, outName);
+  } else if (E2E && process.env.CREST_SAVE_DIR) {
+    target = path.join(process.env.CREST_SAVE_DIR, outName); // test hook: native dialogs can't be driven
   } else {
     const res = await dialog.showSaveDialog(win, {
       defaultPath: path.join(exportsDir(), outName),
@@ -551,6 +555,155 @@ ipcMain.handle('export:save-as', async (_e, name, bytes) => {
   if (res.canceled || !res.filePath) return null;
   await fs.promises.writeFile(res.filePath, toBuffer(bytes));
   return res.filePath;
+});
+
+
+/* ---------- metadata, picture export, REAPER ---------- */
+
+ipcMain.handle('dialog:pick-video', async () => {
+  if (E2E && process.env.CREST_PICK_VIDEO) {
+    const q = norm(process.env.CREST_PICK_VIDEO);
+    allowedFiles.add(q);
+    return q;
+  }
+  const res = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Video', extensions: M.VIDEO_EXT }] });
+  if (res.canceled || !res.filePaths[0]) return null;
+  const p = norm(res.filePaths[0]);
+  allowedFiles.add(p);
+  return p;
+});
+
+function readTags(p) {
+  return new Promise((resolve) => {
+    const bin = ffmpegPath();
+    if (!bin) return resolve({});
+    execFile(bin, ['-hide_banner', '-i', p], { windowsHide: true, timeout: 20000, maxBuffer: 8e6 }, (_e, _so, se) => resolve(M.parseTags(se || '')));
+  });
+}
+const tagText = (tags) => M.TAG_KEYS.map((k) => tags[k] || '').join(' ').toLowerCase().trim();
+
+const metaCacheFile = () => path.join(app.getPath('userData'), 'meta-cache.json');
+let metaCache = null;
+function metaCacheGet() {
+  if (!metaCache) {
+    try {
+      metaCache = JSON.parse(fs.readFileSync(metaCacheFile(), 'utf8'));
+    } catch {
+      metaCache = {};
+    }
+  }
+  return metaCache;
+}
+let metaSaveTimer = null;
+function metaCacheSave() {
+  clearTimeout(metaSaveTimer);
+  metaSaveTimer = setTimeout(() => {
+    const c = metaCacheGet();
+    const keys = Object.keys(c);
+    if (keys.length > 20000) keys.slice(0, keys.length - 20000).forEach((k) => delete c[k]);
+    try {
+      fs.writeFileSync(metaCacheFile(), JSON.stringify(c));
+    } catch {}
+  }, 800);
+}
+
+ipcMain.handle('meta:read', async (_e, p) => {
+  p = norm(p);
+  if (!canServe(p)) throw new Error('not allowed');
+  return readTags(p);
+});
+
+ipcMain.handle('meta:write', async (_e, p, tags) => {
+  p = norm(p);
+  if (!canServe(p) || !tags || typeof tags !== 'object') throw new Error('not allowed');
+  const ext = M.extOf(p);
+  const tmp = path.join(path.dirname(p), `.crest-tmp-${process.pid}${path.extname(p)}`);
+  try {
+    await runFfmpeg(M.tagArgs(p, tmp, tags, ext), { kind: 'meta' });
+    await fs.promises.rename(tmp, p);
+    delete metaCacheGet()[p];
+    return true;
+  } catch (e) {
+    fs.promises.unlink(tmp).catch(() => {});
+    console.error('meta write failed', e && e.message);
+    return false;
+  }
+});
+
+let scanId = 0;
+ipcMain.handle('meta:scan', async (_e, paths) => {
+  if (!Array.isArray(paths)) return;
+  const id = ++scanId;
+  const cache = metaCacheGet();
+  const list = paths.slice(0, 3000).map(norm).filter((p) => canServe(p));
+  let batch = [];
+  let lastSend = Date.now();
+  const flush = (force) => {
+    if (batch.length && (force || Date.now() - lastSend > 250 || batch.length >= 40)) {
+      send('meta:update', batch);
+      batch = [];
+      lastSend = Date.now();
+    }
+  };
+  let next = 0;
+  const worker = async () => {
+    while (id === scanId) {
+      const p = list[next++];
+      if (!p) return;
+      try {
+        const st = await fs.promises.stat(p);
+        const key = `${p}|${st.mtimeMs}|${st.size}`;
+        let text = cache[p] && cache[p].key === key ? cache[p].text : null;
+        if (text == null) {
+          text = tagText(await readTags(p));
+          cache[p] = { key, text };
+        }
+        if (text) batch.push([p, text]);
+      } catch {}
+      flush(false);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  if (id === scanId) {
+    flush(true);
+    metaCacheSave();
+  }
+});
+
+ipcMain.handle('pic:export', async (_e, video, start, duration, bytes, name) => {
+  video = norm(video);
+  if (!canServe(video)) throw new Error('not allowed');
+  const res = E2E && process.env.CREST_SAVE_DIR
+    ? { filePath: path.join(process.env.CREST_SAVE_DIR, safeName(name)) }
+    : await dialog.showSaveDialog(win, {
+        defaultPath: path.join(exportsDir(), safeName(name)),
+        filters: [{ name: 'MP4 video', extensions: ['mp4'] }],
+      });
+  if (res.canceled || !res.filePath) return null;
+  fs.mkdirSync(cacheDir(), { recursive: true });
+  const tmp = path.join(cacheDir(), `mux-${process.pid}-${Date.now()}.wav`);
+  await fs.promises.writeFile(tmp, toBuffer(bytes));
+  try {
+    await runFfmpeg(M.muxArgs(video, tmp, res.filePath, Number(start) || 0, Number(duration) || 1), { kind: 'mux' });
+  } finally {
+    fs.promises.unlink(tmp).catch(() => {});
+  }
+  return res.filePath;
+});
+
+ipcMain.handle('reaper:send', async (_e, name, bytes) => {
+  const dir = R.resourceDir(process.platform, process.env, os.homedir());
+  if (!dir || !fs.existsSync(dir)) return { ok: false, reason: 'no-reaper' };
+  try {
+    const wav = path.join(exportsDir(), safeName(name));
+    await fs.promises.writeFile(wav, toBuffer(bytes));
+    const inst = R.install(dir);
+    R.enqueue(dir, wav);
+    return { ok: true, firstTime: inst.isNew, script: inst.file };
+  } catch (e) {
+    console.error('reaper', e && e.message);
+    return { ok: false, reason: 'write' };
+  }
 });
 
 ipcMain.on('export:open-dir', () => shell.openPath(exportsDir()));

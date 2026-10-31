@@ -13,7 +13,7 @@
     wave: $('wave'), canvas: $('canvas'), playhead: $('playhead'), selection: $('selection'),
     status: $('status'), meter: $('meter'), fx: $('fx'), title: $('title'),
     play: $('play'), timeBtn: $('timeBtn'), cur: $('cur'), dur: $('dur'),
-    exportBtn: $('exportBtn'), exPop: $('exPop'), exFmt: $('exFmt'), exScope: $('exScope'), exFxNote: $('exFxNote'), exGo: $('exGo'), prevHit: $('prevHit'), nextHit: $('nextHit'), loop: $('loop'), vol: $('vol'),
+    exportBtn: $('exportBtn'), toolsBtn: $('toolsBtn'), toolsPop: $('toolsPop'), abBtn: $('abBtn'), matchBtn: $('matchBtn'), picVideo: $('picVideo'), exPop: $('exPop'), exFmt: $('exFmt'), exScope: $('exScope'), exFxNote: $('exFxNote'), exGo: $('exGo'), prevHit: $('prevHit'), nextHit: $('nextHit'), loop: $('loop'), vol: $('vol'),
     grip: $('grip'), gripText: $('gripText'), gripVideo: $('gripVideo'), gripVideoText: $('gripVideoText'),
     folderBtn: $('folderBtn'), open: $('open'), specBtn: $('specBtn'), eqBtn: $('eqBtn'), optsBtn: $('optsBtn'),
     openBig: $('openBig'), openFolderBig: $('openFolderBig'),
@@ -39,7 +39,7 @@
   const DEF = {
     st: 0, sens: 10, snap: true, fade: 2, applyFx: true, naming: 'orig',
     ucs: { catId: '', fxName: '', creatorId: '', sourceId: '' },
-    exFmt: 'wav24', eq: null, vol: 1, sidebar: false, spec: false, tc: false, waveH: 210, eqOpen: false, lang: null,
+    exFmt: 'wav24', match: false, eq: null, vol: 1, sidebar: false, spec: false, tc: false, waveH: 210, eqOpen: false, lang: null,
   };
   let prefs = Object.assign({}, DEF, { ucs: Object.assign({}, DEF.ucs) });
   try {
@@ -63,7 +63,7 @@
   const S = {
     info: null, file: null, audio: null, pyr: null, peaks: [], peakIdx: -1, hits: [], hitSel: -1,
     view: { start: 0, end: 1 }, sel: null, loop: false, playing: false, loadId: 0, endTimer: null,
-    fps: null, extract: null, triedFallback: false, meterAll: null, prepared: null, clip: null,
+    fps: null, metaText: {}, extract: null, triedFallback: false, meterAll: null, prepared: null, clip: null,
     folder: { dir: '', files: [], shown: [] },
   };
 
@@ -97,7 +97,12 @@
     el.stageMsg.classList.toggle('show', !!msg);
   }
 
-  /* ---------- audio graph: media -> EQ -> volume -> analyser -> speakers ---------- */
+  const drawHooks = [];
+  const selHooks = [];
+  const loadHooks = [];
+  const Tools = window.CrestTools;
+
+  /* ---------- audio graph: media -> EQ -> match -> volume -> analyser -> speakers ---------- */
 
   const G = { ctx: null, src: null, chain: null, vol: null, analyser: null, stage: null, nch: 0 };
 
@@ -107,6 +112,8 @@
       G.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
       G.src = G.ctx.createMediaElementSource(el.media);
       G.vol = G.ctx.createGain();
+      G.match = G.ctx.createGain();
+      G.pre = G.ctx.createGain();
       G.analyser = G.ctx.createAnalyser();
       G.analyser.fftSize = 4096;
       G.analyser.smoothingTimeConstant = 0.82;
@@ -129,7 +136,9 @@
         G.stage.merge.disconnect();
         G.stage.gains.forEach((x) => x.disconnect());
       }
+      G.pre.disconnect();
       if (G.chain) G.chain.out.disconnect();
+      G.match.disconnect();
       G.vol.disconnect();
       G.analyser.disconnect();
     } catch {}
@@ -158,11 +167,15 @@
       d.channelCount = Math.max(1, Math.min(d.maxChannelCount || 2, Math.max(2, n)));
       d.channelInterpretation = 'speakers';
     } catch {}
-    G.chain = EQ.buildChain(G.ctx, head, eqState);
-    G.chain.out.connect(G.vol);
+    head.connect(G.pre);
+    G.head = G.pre;
+    G.chain = EQ.buildChain(G.ctx, G.pre, eqState);
+    G.chain.out.connect(G.match);
+    G.match.connect(G.vol);
     G.vol.connect(G.analyser);
     G.analyser.connect(G.ctx.destination);
     applyMute();
+    applyMatch();
   }
 
   /* ---------- channels: layout labels, mute / solo ---------- */
@@ -425,6 +438,11 @@
       if (S.restore && S.restore.sel) setSel(S.restore.sel.start, S.restore.sel.end);
       S.restore = null;
       updateMeter();
+      if (!S.meterAll) S.meterAll = A.loudness(S.audio.channels, S.audio.sampleRate, 0, S.audio.length);
+      const tbn = tabById(activeTab);
+      if (tbn) tbn.lufs = S.meterAll.lufs;
+      applyMatch();
+      for (const fn of loadHooks) fn('ready');
     } catch (err) {
       if (id !== S.loadId) return;
       console.error(err);
@@ -632,6 +650,7 @@
     if (prefs.spec) drawSpectrogram(dpr, w);
     else drawWave(dpr, w, h);
     drawHitMarks(dpr);
+    for (const fn of drawHooks) fn(g, dpr, w, h);
   }
 
   function updatePlayhead() {
@@ -686,8 +705,31 @@
   }
 
   const processingActive = () => prefs.applyFx && (prefs.st !== 0 || EQ.isActive(eqState));
+  // Loudness matching: files play at the level of the first tab (or -23 LUFS when there is only one), never past 0 dBFS.
+  function matchGainDb() {
+    if (!prefs.match || !S.meterAll || !isFinite(S.meterAll.lufs)) return 0;
+    const first = tabsList.length >= 2 ? tabsList[0] : null;
+    const ref = first && first.lufs != null && isFinite(first.lufs) ? first.lufs : -23;
+    return clamp(A.normalizeGainDb('lufs', ref, S.meterAll, 0).gainDb, -24, 12);
+  }
+  function applyMatch() {
+    S.matchDb = matchGainDb();
+    if (G.ctx && G.match) G.match.gain.setTargetAtTime(Math.pow(10, S.matchDb / 20), G.ctx.currentTime, 0.01);
+    el.matchBtn.setAttribute('aria-pressed', String(!!prefs.match));
+    updateFx();
+  }
+  function setMatch(on) {
+    prefs.match = on;
+    savePrefs();
+    applyMatch();
+    toast(on ? t('match') + ' · ' + (S.matchDb >= 0 ? '+' : '−') + Math.abs(S.matchDb || 0).toFixed(1) + ' dB' : '', 1400);
+  }
+  el.matchBtn.addEventListener('click', () => setMatch(!prefs.match));
+  el.abBtn.addEventListener('click', () => abToggle());
+
   function updateFx() {
     const parts = [];
+    if (prefs.match && Math.abs(S.matchDb || 0) >= 0.05) parts.push((S.matchDb > 0 ? '+' : '−') + Math.abs(S.matchDb).toFixed(1) + ' dB match');
     if (EQ.isActive(eqState)) parts.push('EQ');
     if (prefs.st !== 0) parts.push((prefs.st > 0 ? '+' : '−') + Math.abs(prefs.st).toFixed(1) + ' st');
     let s = parts.join(' · ');
@@ -712,6 +754,7 @@
     updateMeter();
     schedulePrepare();
     scheduleClip();
+    for (const fn of selHooks) fn();
   }
   function setSel(a, b, fromHit) {
     const dur = duration();
@@ -944,28 +987,60 @@
   }
 
   // Cut, then (if asked) run through varispeed + EQ with the same graph the player uses.
+  // Varispeed + EQ through an offline copy of the player's graph.
+  async function processChans(chans, sr) {
+    const rate = A.semitoneRate(prefs.st);
+    const inLen = chans[0].length;
+    const outLen = Math.max(1, Math.ceil(inLen / rate));
+    const oc = new OfflineAudioContext(chans.length, outLen, sr);
+    const buf = oc.createBuffer(chans.length, inLen, sr);
+    chans.forEach((c, i) => buf.copyToChannel(c, i));
+    const src = oc.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = rate;
+    const chain = EQ.buildChain(oc, src, eqState);
+    chain.out.connect(oc.destination);
+    src.start();
+    const rendered = await oc.startRendering();
+    const out = [];
+    for (let i = 0; i < rendered.numberOfChannels; i++) out.push(rendered.getChannelData(i).slice());
+    return out;
+  }
+
   async function renderChannels(a, b, noFade) {
     const sr = S.audio.sampleRate;
     let chans = silenceMuted(S.audio.channels.map((c) => c.slice(a, b)));
-    if (processingActive()) {
-      const rate = A.semitoneRate(prefs.st);
-      const inLen = chans[0].length;
-      const outLen = Math.max(1, Math.ceil(inLen / rate));
-      const oc = new OfflineAudioContext(chans.length, outLen, sr);
-      const buf = oc.createBuffer(chans.length, inLen, sr);
-      chans.forEach((c, i) => buf.copyToChannel(c, i));
-      const src = oc.createBufferSource();
-      src.buffer = buf;
-      src.playbackRate.value = rate;
-      const chain = EQ.buildChain(oc, src, eqState);
-      chain.out.connect(oc.destination);
-      src.start();
-      const rendered = await oc.startRendering();
-      chans = [];
-      for (let i = 0; i < rendered.numberOfChannels; i++) chans.push(rendered.getChannelData(i).slice());
-    }
+    if (processingActive()) chans = await processChans(chans, sr);
     if (!noFade) A.applyFade(chans, sr, prefs.fade, prefs.fade);
     return chans;
+  }
+
+  // Decodes any file of the folder (batch processing); uses ffmpeg for what Chromium cannot read.
+  async function loadBufferFor(filePath) {
+    const r = await api.resolve(filePath, { skipList: true });
+    if (!r || r.type !== 'file') throw new Error('unreadable');
+    const info = r.info;
+    const pa = info.probe && info.probe.audio;
+    if (info.probe && !pa) throw new Error('no audio');
+    let buf = null;
+    if (!(info.kind === 'video' || info.plan === 'extract' || info.size > MAX_BYTES)) {
+      try {
+        const ab = await (await fetch(info.url)).arrayBuffer();
+        const wav = A.sniffWavInfo(ab);
+        buf = await decodeAudio(ab, (wav && wav.sampleRate) || (pa && pa.sampleRate));
+      } catch {
+        buf = null;
+      }
+    }
+    if (!buf) {
+      const x = await api.extractAudio(info.path);
+      const ab = await (await fetch(x.url)).arrayBuffer();
+      const wav = A.sniffWavInfo(ab);
+      buf = await decodeAudio(ab, wav && wav.sampleRate);
+    }
+    const channels = [];
+    for (let i = 0; i < buf.numberOfChannels; i++) channels.push(buf.getChannelData(i));
+    return { info, channels, sampleRate: buf.sampleRate };
   }
 
   const fxSuffix = () => {
@@ -1143,17 +1218,19 @@
   /* ---------- folder list ---------- */
 
   const ROW_H = 30;
+  const folderHooks = [];
   function setFolder(dir, files) {
     S.folder = { dir, files, shown: files };
     el.filter.value = '';
     el.folderName.textContent = `${lastPart(dir)} · ${t('folderCount', { n: files.length })}`;
     el.folderName.title = dir;
     applyFilter();
+    for (const fn of folderHooks) fn();
   }
   function applyFilter() {
     const q = el.filter.value.trim().toLowerCase();
     const f = S.folder.files;
-    S.folder.shown = q ? f.filter((x) => x.name.toLowerCase().includes(q)) : f;
+    S.folder.shown = q ? f.filter((x) => x.name.toLowerCase().includes(q) || (S.metaText[x.path] || '').includes(q)) : f;
     el.listSpacer.style.height = S.folder.shown.length * ROW_H + 'px';
     el.listEmpty.hidden = S.folder.shown.length > 0;
     renderRows();
@@ -1226,6 +1303,8 @@
   }
   function renderTabs() {
     el.tabs.hidden = !tabsList.length;
+    applyMatch();
+    el.abBtn.hidden = tabsList.length < 2;
     document.body.classList.toggle('has-tabs', tabsList.length > 0);
     el.tabList.textContent = '';
     for (const tb of tabsList) {
@@ -1255,20 +1334,32 @@
     let tb = tabsList.find((x) => x.path === info.path);
     let restore = null;
     if (tb) {
-      if (tb.id !== activeTab) restore = { time: tb.time, sel: tb.sel };
+      if (tb.id !== activeTab) restore = { time: tb.time, sel: tb.sel, mute: tb.mute };
     } else if (opts.newTab || !cur) {
-      tb = { id: ++tabSeq, path: info.path, name: info.name, time: 0, sel: null };
+      tb = { id: ++tabSeq, path: info.path, name: info.name, time: 0, sel: null, mute: [], lufs: null };
       tabsList.push(tb);
     } else {
       tb = cur;
-      Object.assign(tb, { path: info.path, name: info.name, time: 0, sel: null });
+      Object.assign(tb, { path: info.path, name: info.name, time: 0, sel: null, mute: [], lufs: null });
     }
+    if (tb.id !== activeTab) prevTab = activeTab;
     activeTab = tb.id;
     renderTabs();
     await loadFile(info, Object.assign({}, opts, { restore }));
   }
+  let prevTab = null;
+  async function abToggle() {
+    const other = tabById(prevTab);
+    if (!other || other.id === activeTab || !S.file) return;
+    const cur = el.media.currentTime || 0;
+    const wasPlaying = !el.media.paused;
+    other.time = cur;
+    await activateTab(other.id);
+    if (wasPlaying) togglePlay(true);
+  }
   async function activateTab(id) {
     if (id === activeTab) return;
+    prevTab = activeTab;
     const tb = tabById(id);
     if (!tb) return;
     saveTabState();
@@ -1434,56 +1525,54 @@
 
   const EX_FORMATS = [['wav24', 'WAV 24-bit'], ['wav16', 'WAV 16-bit'], ['aiff', 'AIFF 24-bit'], ['flac', 'FLAC'], ['mp3_320', 'MP3 320 kbps'], ['mp3_v0', 'MP3 V0 (VBR)'], ['ogg', 'OGG Vorbis'], ['m4a', 'AAC (.m4a)']];
   for (const [v, label] of EX_FORMATS) el.exFmt.append(new Option(label, v));
-  function toggleEx(force) {
-    const show = force != null ? force : el.exPop.hidden;
-    if (show) { toggleOpts(false); toggleVi(false); }
-    el.exPop.hidden = !show;
-    el.exportBtn.setAttribute('aria-pressed', String(show));
-    if (!show) return;
-    el.exFmt.value = prefs.exFmt;
-    el.exScope.textContent = S.sel
-      ? t('exScopeSel', { a: fmtT(S.sel.start), b: fmtT(S.sel.end) })
-      : t('exScopeAll');
-    el.exFxNote.textContent = processingActive() || S.mute.some(Boolean) ? t('exFxNote') : '';
-    const b = el.exportBtn.getBoundingClientRect();
-    const w = el.exPop.offsetWidth || 280;
-    el.exPop.style.right = 'auto';
-    el.exPop.style.left = clamp(b.left + b.width / 2 - w / 2, 8, window.innerWidth - w - 8) + 'px';
+  const POPS = {};
+  function regPop(name, pop, btn, o) {
+    POPS[name] = Object.assign({ pop, btn, place: true }, o || {});
   }
+  function placePop(pop, btn) {
+    const r = btn.getBoundingClientRect();
+    const w = pop.offsetWidth || 280;
+    pop.style.right = 'auto';
+    pop.style.left = clamp(r.left + r.width / 2 - w / 2, 8, window.innerWidth - w - 8) + 'px';
+  }
+  function togglePop(name, force) {
+    const P = POPS[name];
+    if (!P) return;
+    const show = force != null ? force : P.pop.hidden;
+    if (show) for (const k in POPS) if (k !== name && !POPS[k].pop.hidden) togglePop(k, false);
+    const was = !P.pop.hidden;
+    P.pop.hidden = !show;
+    if (P.btn) P.btn.setAttribute('aria-pressed', String(show));
+    if (show) {
+      if (P.onOpen) P.onOpen();
+      if (P.place && P.btn) placePop(P.pop, P.btn);
+    } else if (was && P.onClose) P.onClose();
+  }
+  const closePops = () => Object.keys(POPS).forEach((k) => togglePop(k, false));
+  const anyPopOpen = () => Object.keys(POPS).some((k) => !POPS[k].pop.hidden);
+  const toggleOpts = (f) => togglePop('opts', f);
+  const toggleVi = (f) => togglePop('vi', f);
+  const toggleEx = (f) => togglePop('ex', f);
+  function fillExPop() {
+    el.exFmt.value = prefs.exFmt;
+    el.exScope.textContent = S.sel ? t('exScopeSel', { a: fmtT(S.sel.start), b: fmtT(S.sel.end) }) : t('exScopeAll');
+    el.exFxNote.textContent = processingActive() || S.mute.some(Boolean) ? t('exFxNote') : '';
+  }
+  regPop('opts', el.opts, el.optsBtn, { place: false });
+  regPop('vi', el.viPop, el.viBtn);
+  regPop('ex', el.exPop, el.exportBtn, { onOpen: fillExPop });
+  regPop('tools', el.toolsPop, el.toolsBtn);
+  el.toolsBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePop('tools'); });
   el.exportBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleEx(); });
   el.exFmt.addEventListener('change', () => { prefs.exFmt = el.exFmt.value; savePrefs(); });
   el.exGo.addEventListener('click', () => { toggleEx(false); exportCurrent(); });
-
-  function toggleVi(force) {
-    const show = force != null ? force : el.viPop.hidden;
-    if (show) { toggleOpts(false); toggleEx(false); }
-    el.viPop.hidden = !show;
-    el.viBtn.setAttribute('aria-pressed', String(show));
-    if (show) {
-      const b = el.viBtn.getBoundingClientRect();
-      const w = el.viPop.offsetWidth || 280;
-      el.viPop.style.right = 'auto';
-      el.viPop.style.left = clamp(b.left + b.width / 2 - w / 2, 8, window.innerWidth - w - 8) + 'px';
-    }
-  }
-  function toggleOpts(force) {
-    const show = force != null ? force : el.opts.hidden;
-    if (show) { toggleVi(false); toggleEx(false); }
-    el.opts.hidden = !show;
-    el.optsBtn.setAttribute('aria-pressed', String(show));
-  }
-  el.viBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleVi();
-  });
-  el.optsBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleOpts();
-  });
+  el.viBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleVi(); });
+  el.optsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleOpts(); });
   document.addEventListener('mousedown', (e) => {
-    if (!el.opts.hidden && !el.opts.contains(e.target) && !el.optsBtn.contains(e.target)) toggleOpts(false);
-    if (!el.viPop.hidden && !el.viPop.contains(e.target) && !el.viBtn.contains(e.target)) toggleVi(false);
-    if (!el.exPop.hidden && !el.exPop.contains(e.target) && !el.exportBtn.contains(e.target)) toggleEx(false);
+    for (const k in POPS) {
+      const P = POPS[k];
+      if (!P.pop.hidden && !P.pop.contains(e.target) && !(P.btn && P.btn.contains(e.target))) togglePop(k, false);
+    }
   });
 
   el.st.addEventListener('input', () => {
@@ -1679,12 +1768,14 @@
       case 'v': case 'V': toggleVi(); break;
       case 'b': case 'B': el.folderBtn.click(); break;
       case 'f': case 'F': toggleFullscreen(); break;
+      case 'm': case 'M': setMatch(!prefs.match); break;
+      case '\\': abToggle(); break;
+      case 'i': case 'I': Tools.open('meta'); break;
       case ',': stepFrame(-1); break;
       case '.': stepFrame(1); break;
       case 'Escape':
-        if (!el.opts.hidden) toggleOpts(false);
-        else if (!el.viPop.hidden) toggleVi(false);
-        else if (!el.exPop.hidden) toggleEx(false);
+        if (Tools.modalOpen()) Tools.closeModal();
+        else if (anyPopOpen()) closePops();
         else clearSel();
         break;
       case 'z': case 'Z': zoomToSelection(); break;
@@ -1727,7 +1818,7 @@
     // extra files become background tabs
     for (const p of paths.slice(1)) {
       const r = await api.resolve(p, { skipList: true });
-      if (r && r.type === 'file' && !tabsList.some((x) => x.path === r.info.path)) tabsList.push({ id: ++tabSeq, path: r.info.path, name: r.info.name, time: 0, sel: null });
+      if (r && r.type === 'file' && !tabsList.some((x) => x.path === r.info.path)) tabsList.push({ id: ++tabSeq, path: r.info.path, name: r.info.name, time: 0, sel: null, mute: [], lufs: null });
     }
     renderTabs();
   });
@@ -1748,6 +1839,24 @@
     if (kind === 'proxy') stageMsg(t('previewPrep', { pct: p }));
     else if (kind === 'extract' && !S.audio) toast(t('readingPct', { pct: p }), 0);
     else if (kind === 'clip' && !S.clip) el.gripVideoText.textContent = t('gripVideoPrep', { pct: p });
+  });
+
+  /* ---------- tools (renderer/tools.js) ---------- */
+
+  Tools.init({
+    S, G, el, api, A, EQ, eqState, I, t, toast, fmtT, clamp, baseName,
+    getPrefs: () => prefs, savePrefs, regPop, togglePop, closePops,
+    addDrawHook: (fn) => drawHooks.push(fn), addSelHook: (fn) => selHooks.push(fn), addLoadHook: (fn) => loadHooks.push(fn),
+    t2x, W, requestDraw, setSel, seek, ensureVisible, togglePlay, snappedRegion, renderChannels, processChans, loadBufferFor,
+    exportName, fxSuffix, processingActive, processingLabel: () => fxSuffix(),
+    exFormats: EX_FORMATS, addFolderHook: (fn) => folderHooks.push(fn), refreshFilter: () => { if (S.folder) applyFilter(); },
+    releaseMedia: () => { teardown(); el.media.pause(); el.media.removeAttribute('src'); el.media.load(); },
+    reloadCurrent: async () => {
+      if (!S.file) return;
+      const r = await api.resolve(S.file.path, { skipList: true });
+      if (r && r.type === 'file') await loadFile(r.info, { restore: { time: S.reloadTime || 0, sel: S.sel && { start: S.sel.start, end: S.sel.end }, mute: S.mute.slice() } });
+    },
+    resolveRow: () => {}, activeSrc: () => (S.info ? S.info.path : null), setSetupHook: (fn) => { S.setupHook = fn; },
   });
 
   /* ---------- init ---------- */
@@ -1771,6 +1880,6 @@
   // exposed only for the automated end-to-end test (main adds ?e2e=1 under CREST_E2E)
   if (new URLSearchParams(location.search).has('e2e')) {
     window.A_encode = A.encodeWav;
-    window.__crest = { exportCurrent, G, toggleMute, S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
+    window.__crest = { tabs: () => tabsList, closeTab, abToggle, exportCurrent, G, toggleMute, S, prefs, eqState, G, A, EQ, I, loadFile, handleResolved, renderChannels, snappedRegion, exportName, setEqOpen, selectHit, gotoHit, dragPath, setSel, exportAllHits, navigate };
   }
 })();

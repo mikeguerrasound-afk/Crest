@@ -637,7 +637,7 @@
    * 24-bit PCM WAV of channels[*][start, end). Float32 in, exact round-trip for 24-bit sources.
    * More than two channels are written as WAVE_FORMAT_EXTENSIBLE.
    */
-  function encodeWav(channels, sampleRate, start, end) {
+  function encodeWav(channels, sampleRate, start, end, opts) {
     const nCh = channels.length;
     start = start || 0;
     if (end == null) end = channels[0].length;
@@ -647,7 +647,9 @@
     const pad = dataBytes & 1;
     const ext = nCh > 2;
     const fmtSize = ext ? 40 : 16;
-    const total = 12 + 8 + fmtSize + 8 + dataBytes + pad;
+    const loop = opts && opts.loop;
+    const smplBytes = loop ? 8 + 60 : 0;
+    const total = 12 + 8 + fmtSize + 8 + dataBytes + pad + smplBytes;
     const out = new Uint8Array(total);
     const dv = new DataView(out.buffer);
     let o = 0;
@@ -694,7 +696,44 @@
         out[o++] = (v >> 16) & 255;
       }
     }
+    o += pad;
+    if (loop) {
+      // 'smpl' chunk: one forward loop, read by Wwise, FMOD, Unity, Reaper, samplers...
+      str('smpl');
+      u32(60);
+      u32(0); // manufacturer
+      u32(0); // product
+      u32(Math.round(1e9 / sampleRate)); // sample period (ns)
+      u32(60); // MIDI unity note
+      u32(0); // pitch fraction
+      u32(0); // SMPTE format
+      u32(0); // SMPTE offset
+      u32(1); // loops
+      u32(0); // sampler data
+      u32(0); // cue id
+      u32(0); // type: forward
+      u32(loop.start);
+      u32(loop.end); // inclusive last sample
+      u32(0); // fraction
+      u32(0); // play count: infinite
+    }
     return out;
+  }
+
+  /** Reads the first loop of a WAV 'smpl' chunk: { start, end } or null. */
+  function readSmplLoop(ab) {
+    const u8 = ab instanceof Uint8Array ? ab : new Uint8Array(ab);
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let o = 12;
+    while (o + 8 <= u8.length) {
+      const id = String.fromCharCode(u8[o], u8[o + 1], u8[o + 2], u8[o + 3]);
+      const size = dv.getUint32(o + 4, true);
+      if (id === 'smpl' && dv.getUint32(o + 8 + 28, true) >= 1) {
+        return { start: dv.getUint32(o + 8 + 44, true), end: dv.getUint32(o + 8 + 48, true) };
+      }
+      o += 8 + size + (size & 1);
+    }
+    return null;
   }
 
   /**
@@ -724,7 +763,238 @@
     return null;
   }
 
+
+  /* ------------------------------------------------------------------ */
+  /* Loops                                                               */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Seamless loop of channels[*][a, b): the last `x` samples are cross-faded (equal power) into the head,
+   * so the result is x samples shorter and its end flows straight into its start.
+   */
+  function makeLoop(channels, a, b, x) {
+    const L = b - a;
+    x = Math.max(0, Math.min(Math.round(x || 0), L >> 1));
+    return channels.map((d) => {
+      const out = new Float32Array(L - x);
+      for (let i = x; i < L - x; i++) out[i] = d[a + i];
+      for (let i = 0; i < x; i++) {
+        const ph = (i / x) * (Math.PI / 2);
+        out[i] = d[a + i] * Math.sin(ph) + d[a + L - x + i] * Math.cos(ph);
+      }
+      if (x === 0) for (let i = 0; i < L; i++) out[i] = d[a + i];
+      return out;
+    });
+  }
+
+  /**
+   * Best loop end near `b` for a loop starting at `a`: the end whose following samples look most like the
+   * samples that follow `a` (normalised cross-correlation), searched back to `b - searchMs`.
+   * Returns { end, score } with score in [-1, 1].
+   */
+  function bestLoopEnd(channels, sr, a, b, opt) {
+    opt = opt || {};
+    const n = channels[0].length;
+    const W = Math.max(16, Math.round((sr * (opt.windowMs || 25)) / 1000));
+    const S = Math.round((sr * (opt.searchMs || 250)) / 1000);
+    const nc = channels.length;
+    const mix = (i) => {
+      let v = 0;
+      for (let c = 0; c < nc; c++) v += channels[c][i];
+      return v / nc;
+    };
+    if (a + W > n) return { end: b, score: 0 };
+    const head = new Float32Array(W);
+    let eh = 0;
+    for (let i = 0; i < W; i++) {
+      head[i] = mix(a + i);
+      eh += head[i] * head[i];
+    }
+    const lo = Math.max(a + 4 * W, b - S);
+    const hi = Math.min(n - W, b);
+    let best = Math.min(b, n);
+    let bestScore = -2;
+    for (let e = lo; e <= hi; e++) {
+      let dot = 0;
+      let ec = 0;
+      for (let i = 0; i < W; i++) {
+        const v = mix(e + i);
+        dot += v * head[i];
+        ec += v * v;
+      }
+      const sc = eh > 0 && ec > 0 ? dot / Math.sqrt(eh * ec) : 0;
+      // among (near) equal matches keep the latest, so the loop stays as long as the selection allows
+      if (sc > bestScore - 1e-4) {
+        bestScore = Math.max(bestScore, sc);
+        best = e;
+      }
+    }
+    return { end: best, score: bestScore < -1 ? 0 : bestScore };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Quality control                                                     */
+  /* ------------------------------------------------------------------ */
+
+  /** Runs of >= minRun consecutive samples at or above `thresh`; channels merged when within 5 ms. */
+  function findClips(channels, sr, thresh, minRun, maxOut) {
+    thresh = thresh || 0.999;
+    minRun = minRun || 3;
+    maxOut = maxOut || 2000;
+    const found = [];
+    for (let c = 0; c < channels.length; c++) {
+      const d = channels[c];
+      let run = 0;
+      for (let i = 0; i <= d.length; i++) {
+        const hit = i < d.length && (d[i] >= thresh || d[i] <= -thresh);
+        if (hit) run++;
+        else {
+          if (run >= minRun) found.push({ start: i - run, end: i, run, ch: c });
+          run = 0;
+        }
+      }
+    }
+    found.sort((p, q) => p.start - q.start);
+    const gap = Math.round(sr * 0.005);
+    const out = [];
+    for (const f of found) {
+      const last = out[out.length - 1];
+      if (last && f.start - last.end <= gap) {
+        last.end = Math.max(last.end, f.end);
+        last.run = Math.max(last.run, f.run);
+      } else out.push({ start: f.start, end: f.end, run: f.run });
+      if (out.length >= maxOut) break;
+    }
+    return out;
+  }
+
+  /** Mean value per channel (DC offset), linear. */
+  function dcOffset(channels, start, end) {
+    return channels.map((d) => {
+      const s = start || 0;
+      const e = end == null ? d.length : end;
+      let sum = 0;
+      for (let i = s; i < e; i++) sum += d[i];
+      return e > s ? sum / (e - s) : 0;
+    });
+  }
+
+  /** Correlation of the first two channels, whole range and worst 100 ms window. +1 mono, 0 wide, -1 out of phase. */
+  function phaseCorrelation(channels, sr, start, end) {
+    if (channels.length < 2) return null;
+    const L = channels[0];
+    const R = channels[1];
+    const s = start || 0;
+    const e = end == null ? L.length : end;
+    const win = Math.max(1, Math.round(sr * 0.1));
+    let ll = 0, rr = 0, lr = 0;
+    let min = 1;
+    for (let w = s; w < e; w += win) {
+      let a = 0, b = 0, c = 0;
+      const we = Math.min(e, w + win);
+      for (let i = w; i < we; i++) {
+        a += L[i] * L[i];
+        b += R[i] * R[i];
+        c += L[i] * R[i];
+      }
+      ll += a; rr += b; lr += c;
+      if (a > 1e-8 && b > 1e-8) min = Math.min(min, c / Math.sqrt(a * b));
+    }
+    const avg = ll > 0 && rr > 0 ? lr / Math.sqrt(ll * rr) : 1;
+    return { avg, min };
+  }
+
+  /** Inter-sample (true) peak in dBFS, 4x oversampled with a windowed-sinc kernel. */
+  function truePeak(channels, start, end) {
+    const TAPS = 8;
+    const kernels = [0.25, 0.5, 0.75].map((f) => {
+      const k = new Float64Array(2 * TAPS);
+      for (let j = -TAPS + 1; j <= TAPS; j++) {
+        const x = j - f;
+        const sinc = Math.sin(Math.PI * x) / (Math.PI * x);
+        const win = 0.5 + 0.5 * Math.cos((Math.PI * x) / (TAPS + 0.5));
+        k[j + TAPS - 1] = sinc * win;
+      }
+      return k;
+    });
+    let peak = 0;
+    for (const d of channels) {
+      const s = start || 0;
+      const e = end == null ? d.length : end;
+      for (let i = s; i < e; i++) {
+        const v = Math.abs(d[i]);
+        if (v > peak) peak = v;
+      }
+    }
+    if (peak === 0) return -Infinity;
+    let tp = peak;
+    for (const d of channels) {
+      const s = Math.max(TAPS, start || 0);
+      const e = Math.min(d.length - TAPS - 1, end == null ? d.length : end);
+      for (let i = s; i < e; i++) {
+        // only look where a neighbour could create an over
+        if (Math.abs(d[i]) < peak * 0.5 && Math.abs(d[i + 1]) < peak * 0.5) continue;
+        for (let kk = 0; kk < 3; kk++) {
+          const k = kernels[kk];
+          let acc = 0;
+          for (let j = -TAPS + 1; j <= TAPS; j++) acc += d[i + j] * k[j + TAPS - 1];
+          const v = Math.abs(acc);
+          if (v > tp) tp = v;
+        }
+      }
+    }
+    return 20 * Math.log10(tp);
+  }
+
+  /** Lissajous points for a goniometer: Float32Array [x0, y0, x1, y1...], x = side, y = mid, evenly decimated. */
+  function goniometerPoints(channels, start, end, maxPts) {
+    const L = channels[0];
+    const R = channels[1] || channels[0];
+    const s = start || 0;
+    const e = end == null ? L.length : end;
+    const len = Math.max(0, e - s);
+    const step = Math.max(1, Math.floor(len / (maxPts || 4000)));
+    const out = [];
+    for (let i = s; i < e; i += step) out.push((L[i] - R[i]) * Math.SQRT1_2, (L[i] + R[i]) * Math.SQRT1_2);
+    return Float32Array.from(out);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Gain / normalisation                                                */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Gain in dB that brings `measured` ({ peakDb, lufs }) to `target`.
+   * mode 'peak' aims the sample peak; mode 'lufs' aims integrated loudness but never lets the peak pass `ceilingDb`.
+   */
+  function normalizeGainDb(mode, target, measured, ceilingDb) {
+    if (!isFinite(measured.peakDb)) return { gainDb: 0, limited: false };
+    if (mode === 'peak') return { gainDb: target - measured.peakDb, limited: false };
+    if (mode === 'lufs') {
+      if (!isFinite(measured.lufs)) return { gainDb: 0, limited: false };
+      const want = target - measured.lufs;
+      const max = (ceilingDb == null ? -1 : ceilingDb) - measured.peakDb;
+      return want > max ? { gainDb: max, limited: true } : { gainDb: want, limited: false };
+    }
+    return { gainDb: 0, limited: false };
+  }
+
+  function applyGain(channels, db) {
+    const g = Math.pow(10, db / 20);
+    if (Math.abs(g - 1) < 1e-9) return;
+    for (const d of channels) for (let i = 0; i < d.length; i++) d[i] *= g;
+  }
+
+  /** UCS-style filename -> fields (CatID_FXName_CreatorID_SourceID), or null when it does not look like UCS. */
+  function parseUcsName(name) {
+    const base = String(name).replace(/\.[^.]+$/, '');
+    const m = /^([A-Z]{3,}[A-Za-z]*)_([^_]+)(?:_([^_]+))?(?:_([^_]+))?/.exec(base);
+    if (!m) return null;
+    return { catId: m[1], fxName: m[2].replace(/\s+\d+$/, ''), creatorId: m[3] || '', sourceId: m[4] || '' };
+  }
+
   return {
+    makeLoop, bestLoopEnd, findClips, dcOffset, phaseCorrelation, truePeak, goniometerPoints, normalizeGainDb, applyGain, parseUcsName, readSmplLoop,
     buildPyramid, columns, findPeaks, detectHits, snapZero, applyFade, loudness,
     fft, spectrogram, biquadCoeffs, biquadResponseDb,
     fmtTime, fmtTimecode, stamp, semitoneRate, ucsName, ucsClean, encodeWav, sniffWavInfo,

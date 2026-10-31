@@ -14,6 +14,9 @@
   <nav id="tabs" hidden>
     <div id="tabList" role="tablist"></div>
     <button id="tabNew" class="tab-new" data-i18n-title="tNewTab" aria-label="New tab">+</button>
+    <span class="spacer"></span>
+    <button id="abBtn" class="mini tabtool" data-i18n-title="tAB" hidden>A/B</button>
+    <button id="matchBtn" class="mini tabtool" data-i18n-title="tMatch" aria-pressed="false" data-i18n="match"></button>
   </nav>
 
   <div id="layout">
@@ -29,6 +32,7 @@
     <main>
       <section id="stage">
         <video id="media" crossorigin="anonymous" playsinline preload="auto"></video>
+        <video id="picVideo" muted playsinline preload="auto"></video>
         <div id="stageMsg"></div>
       </section>
       <div id="splitter" role="separator" aria-orientation="horizontal"></div>
@@ -120,6 +124,10 @@
       <button class="btn icon" id="folderBtn" data-i18n-title="tFolder">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       </button>
+      <button class="btn" id="toolsBtn" data-i18n-title="tTools" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg>
+        <span class="lbl" data-i18n="tools"></span>
+      </button>
       <button class="btn" id="exportBtn" data-i18n-title="tExport" aria-pressed="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
         <span class="lbl" data-i18n="export"></span>
@@ -144,6 +152,81 @@
       </button>
     </div>
   </footer>
+
+  <div id="toolsPop" class="pop pop-sm menu" hidden>
+    <button class="item" data-tool="pic"><span data-i18n="toolPic"></span></button>
+    <button class="item" data-tool="loop"><span data-i18n="toolLoop"></span></button>
+    <button class="item" data-tool="qc"><span data-i18n="toolQc"></span></button>
+    <button class="item" data-tool="batch"><span data-i18n="toolBatch"></span></button>
+    <button class="item" data-tool="meta"><span data-i18n="toolMeta"></span></button>
+    <button class="item" data-tool="reaper"><span data-i18n="toolReaper"></span></button>
+  </div>
+
+  <div id="qcPop" class="pop pop-qc" hidden>
+    <h3 data-i18n="qcTitle"></h3>
+    <p class="note" id="qcScope"></p>
+    <canvas id="qcGonio" class="gonio"></canvas>
+    <div id="qcStats" class="stats"></div>
+    <label class="chk"><input type="checkbox" id="qcMarks"><span data-i18n="qcMarks"></span></label>
+  </div>
+
+  <div id="loopPop" class="pop pop-qc" hidden>
+    <h3 data-i18n="loopTitle"></h3>
+    <p class="note" id="loopScope"></p>
+    <div class="row"><span data-i18n="loopX"></span><input id="loopX" type="range" min="0" max="1000" step="5" value="100"><output id="loopXOut"></output></div>
+    <div class="row"><button class="mini" id="loopBest" data-i18n="loopBest"></button><output id="loopScore"></output></div>
+    <canvas id="loopSeam" class="seam"></canvas>
+    <p class="note" data-i18n="loopSeamNote"></p>
+    <div class="pop-actions">
+      <button class="btn small" id="loopPlay" data-i18n="loopPlay"></button>
+      <button class="btn primary small" id="loopExport" data-i18n="loopExport"></button>
+    </div>
+    <p class="note" data-i18n="loopHint"></p>
+  </div>
+
+  <div id="picPop" class="pop pop-qc" hidden>
+    <h3 data-i18n="picTitle"></h3>
+    <p class="note" id="picName"></p>
+    <div class="pop-actions">
+      <button class="btn small" id="picChoose" data-i18n="picChoose"></button>
+      <button class="btn small" id="picClear" data-i18n="picClear"></button>
+    </div>
+    <div class="row"><span data-i18n="picOffset"></span><input id="picOff" type="range" min="0" max="10" step="0.01" value="0"><output id="picOffOut"></output></div>
+    <div class="pop-actions"><button class="btn primary small" id="picExport" data-i18n="picExport"></button></div>
+    <p class="note" data-i18n="picHint"></p>
+  </div>
+
+  <div id="modal" hidden>
+    <section id="batchCard" class="card" hidden>
+      <h2 data-i18n="batchTitle"></h2>
+      <p class="note" id="batchSrc"></p>
+      <label class="chk"><input type="checkbox" id="bApplyFx"><span data-i18n="bApplyFx"></span></label>
+      <div class="row"><span data-i18n="bNorm"></span>
+        <select id="bNorm"><option value="none" data-i18n="bNormNone"></option><option value="peak" data-i18n="bNormPeak"></option><option value="lufs" data-i18n="bNormLufs"></option></select>
+        <input id="bTarget" type="number" step="0.5" value="-1"><span id="bUnit">dBFS</span></div>
+      <div class="row" id="bCeilRow"><span data-i18n="bCeil"></span><input id="bCeil" type="number" step="0.5" value="-1"><span>dBFS</span></div>
+      <div class="row"><span data-i18n="exFormat"></span><select id="bFmt"></select></div>
+      <div class="row"><span data-i18n="bSuffix"></span><input id="bSuffix" type="text" value="_proc" spellcheck="false"></div>
+      <div class="prog" id="bProg" hidden><div id="bBar"></div></div>
+      <p class="note" id="bStatus"></p>
+      <div class="actions"><button class="btn primary" id="bRun" data-i18n="bRun"></button><button class="btn" id="bClose" data-i18n="close"></button></div>
+    </section>
+
+    <section id="metaCard" class="card" hidden>
+      <h2 data-i18n="metaTitle"></h2>
+      <p class="note" id="metaFile"></p>
+      <label class="fld"><span data-i18n="mTitle"></span><input id="mTitle" type="text" spellcheck="false"></label>
+      <label class="fld"><span data-i18n="mComment"></span><textarea id="mComment" rows="3" spellcheck="false"></textarea></label>
+      <label class="fld"><span data-i18n="mKeywords"></span><input id="mKeywords" type="text" spellcheck="false"></label>
+      <div class="two">
+        <label class="fld"><span data-i18n="mGenre"></span><input id="mGenre" type="text" spellcheck="false"></label>
+        <label class="fld"><span data-i18n="mArtist"></span><input id="mArtist" type="text" spellcheck="false"></label>
+        <label class="fld"><span data-i18n="mAlbum"></span><input id="mAlbum" type="text" spellcheck="false"></label>
+      </div>
+      <p class="note" id="metaNote"></p>
+      <div class="actions"><button class="btn" id="mFromName" data-i18n="mFromName"></button><span class="spacer"></span><button class="btn primary" id="mSave" data-i18n="mSave"></button><button class="btn" id="mClose" data-i18n="close"></button></div>
+    </section>
+  </div>
 
   <div id="exPop" class="pop pop-sm" hidden>
     <h3 data-i18n="exTitle"></h3>
@@ -209,6 +292,7 @@
   <script src="i18n.js"></script>
   <script src="audio-utils.js"></script>
   <script src="eq.js"></script>
+  <script src="tools.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

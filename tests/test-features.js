@@ -286,4 +286,99 @@ test('export formats: ffmpeg args per format, stereo-only formats are down-mixed
   for (const k of Object.keys(M.EXPORT_FORMATS)) assert.ok(M.EXPORT_FORMATS[k].ext && M.EXPORT_FORMATS[k].label);
 });
 
+const tone = (n, f, sr, amp) => Float32Array.from({ length: n }, (_, i) => (amp || 0.5) * Math.sin((2 * Math.PI * f * i) / (sr || 48000)));
+
+test('loop maker: cross-fade removes the click at the seam and shortens by the fade length', () => {
+  const sr = 48000;
+  // a tone whose end does not match its start (phase jump if simply repeated)
+  const d = tone(sr, 997, sr);
+  const plain = A.makeLoop([d], 0, 40000, 0)[0];
+  const xf = A.makeLoop([d], 0, 40000, 4800)[0];
+  assert.strictEqual(plain.length, 40000);
+  assert.strictEqual(xf.length, 40000 - 4800);
+  const jump = (x) => Math.abs(x[0] - x[x.length - 1]);
+  assert.ok(jump(xf) < 0.06, 'seam step ' + jump(xf));
+  assert.ok(jump(plain) > jump(xf));
+  // equal power: the faded part keeps its level
+  let peak = 0;
+  for (let i = 0; i < 4800; i++) peak = Math.max(peak, Math.abs(xf[i]));
+  assert.ok(peak > 0.45 && peak < 0.75, 'level ' + peak);
+});
+
+test('bestLoopEnd lands on a period boundary of a periodic signal', () => {
+  const sr = 48000;
+  const f = 480; // period 100 samples
+  const d = tone(30000, f, sr);
+  const r = A.bestLoopEnd([d], sr, 1000, 20037, { searchMs: 100 });
+  assert.ok(r.score > 0.99, 'score ' + r.score);
+  assert.strictEqual((r.end - 1000) % 100, 0, 'end ' + r.end);
+});
+
+test('WAV smpl chunk: loop points survive a round trip and the file stays readable', () => {
+  const ch = [tone(1000, 440, 48000)];
+  const wav = A.encodeWav(ch, 48000, 0, 1000, { loop: { start: 0, end: 999 } });
+  assert.deepStrictEqual(A.readSmplLoop(wav), { start: 0, end: 999 });
+  assert.strictEqual(wav.length, 12 + 8 + 16 + 8 + 3000 + 68);
+  assert.strictEqual(A.readSmplLoop(A.encodeWav(ch, 48000)), null);
+  const f = path.join(os.tmpdir(), 'crest-smpl-' + process.pid + '.wav');
+  fs.writeFileSync(f, wav);
+  const r = spawnSync(FF, ['-hide_banner', '-v', 'error', '-i', f, '-f', 'null', '-'], { encoding: 'utf8' });
+  fs.unlinkSync(f);
+  assert.strictEqual(r.status, 0, r.stderr);
+});
+
+test('QC: clipping runs, DC offset, phase correlation, true peak', () => {
+  const sr = 48000;
+  const d = tone(sr, 100, sr, 0.5);
+  for (let i = 1000; i < 1010; i++) d[i] = 1;
+  for (let i = 5000; i < 5002; i++) d[i] = 1; // too short to count
+  const clips = A.findClips([d], sr, 0.999, 3);
+  assert.strictEqual(clips.length, 1);
+  assert.strictEqual(clips[0].start, 1000);
+  assert.strictEqual(clips[0].run, 10);
+  const dc = A.dcOffset([Float32Array.from({ length: 1000 }, () => 0.1)], 0, 1000);
+  assert.ok(Math.abs(dc[0] - 0.1) < 1e-6);
+  const L = tone(sr, 220, sr);
+  const R = Float32Array.from(L, (v) => -v);
+  assert.ok(A.phaseCorrelation([L, L], sr).avg > 0.999);
+  assert.ok(A.phaseCorrelation([L, R], sr).avg < -0.999);
+  assert.strictEqual(A.phaseCorrelation([L], sr), null);
+  // 0.7 sampled twice per cycle at 45 degrees: sample peak 0.707*A, true peak = A
+  const fs4 = Float32Array.from({ length: 4800 }, (_, i) => Math.sin((2 * Math.PI * i) / 4 + Math.PI / 4));
+  const tp = A.truePeak([fs4], 0, fs4.length);
+  assert.ok(Math.abs(tp - 0) < 0.35, 'true peak ' + tp + ' dB');
+  assert.ok(A.loudness([fs4], 48000).peakDb < -2.5);
+  assert.ok(A.goniometerPoints([L, R], 0, L.length, 1000).length <= 2 * 1010);
+});
+
+test('normalize: peak and LUFS targets, LUFS never pushes the peak over the ceiling', () => {
+  assert.ok(Math.abs(A.normalizeGainDb('peak', -1, { peakDb: -7.5, lufs: -20 }).gainDb - 6.5) < 1e-9);
+  const ok = A.normalizeGainDb('lufs', -16, { peakDb: -12, lufs: -23 }, -1);
+  assert.ok(Math.abs(ok.gainDb - 7) < 1e-9 && !ok.limited);
+  const lim = A.normalizeGainDb('lufs', -16, { peakDb: -3, lufs: -23 }, -1);
+  assert.ok(Math.abs(lim.gainDb - 2) < 1e-9 && lim.limited);
+  assert.strictEqual(A.normalizeGainDb('lufs', -16, { peakDb: -Infinity, lufs: -Infinity }).gainDb, 0);
+  const c = [Float32Array.from([0.5, -0.5])];
+  A.applyGain(c, 6.0206);
+  assert.ok(Math.abs(c[0][0] - 1) < 1e-4);
+});
+
+test('UCS filename parsing and tag round trip through real ffmpeg (wav, flac, mp3, m4a, ogg)', () => {
+  assert.deepStrictEqual(A.parseUcsName('WEAPGun_Pistol Shot 03_MG_GAME01.wav'), { catId: 'WEAPGun', fxName: 'Pistol Shot', creatorId: 'MG', sourceId: 'GAME01' });
+  assert.strictEqual(A.parseUcsName('01 hits.wav'), null);
+  const tags = { title: 'Door Slam', comment: 'Heavy wood door slam', keywords: 'door, wood', genre: 'DOORWood', artist: 'MG', album: 'GAME01' };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crest-tags-'));
+  for (const ext of ['wav', 'flac', 'mp3', 'm4a', 'ogg']) {
+    const a = path.join(dir, 'a.' + ext);
+    const b = path.join(dir, 'b.' + ext);
+    spawnSync(FF, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=d=0.5', a]);
+    const w = spawnSync(FF, M.tagArgs(a, b, tags, ext), { encoding: 'utf8' });
+    assert.strictEqual(w.status, 0, ext + ': ' + w.stderr);
+    const got = M.parseTags(spawnSync(FF, ['-hide_banner', '-i', b], { encoding: 'utf8' }).stderr);
+    for (const k of M.TAG_KEYS) assert.strictEqual(got[k], tags[k], ext + ' ' + k);
+  }
+  const mux = M.muxArgs('v.mp4', 'a.wav', 'o.mp4', 1.5, 2);
+  assert.ok(mux.includes('-ss') && mux.includes('libx264') && mux[mux.length - 1] === 'o.mp4');
+});
+
 console.log(`\n${passed} feature tests passed`);

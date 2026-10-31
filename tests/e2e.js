@@ -10,6 +10,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { _electron } = require('playwright');
 const A = require('../renderer/audio-utils.js');
+const M = require('../lib/media.js');
 
 const ROOT = path.join(__dirname, '..');
 const shots = process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'crest-shots-'));
@@ -68,6 +69,8 @@ const toneWav = path.join(media, '02 tone.wav');
 }
 const surround = path.join(media, '06 surround.wav');
 ff(['-f', 'lavfi', '-i', 'sine=frequency=440:duration=2:sample_rate=48000', '-af', 'pan=5.1|FL=c0|FR=0.5*c0|FC=0.25*c0|LFE=0.1*c0|BL=0.5*c0|BR=0.5*c0', '-c:a', 'pcm_s24le', surround]);
+const clipped = path.join(work, 'clipped.wav');
+ff(['-f', 'lavfi', '-i', 'sine=frequency=300:duration=1:sample_rate=48000', '-af', 'volume=24dB', '-c:a', 'pcm_s16le', clipped]);
 const mp4 = path.join(media, '03 video.mp4');
 ff(['-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=25:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=4:sample_rate=48000', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', mp4]);
 const prores = path.join(media, '04 prores.mov');
@@ -79,11 +82,15 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
   const exportsDir = path.join(work, 'exports');
   const batchDir = path.join(work, 'batch');
   fs.mkdirSync(batchDir);
+  const saveDir = path.join(work, 'save');
+  fs.mkdirSync(saveDir);
+  const reaperDir = path.join(work, 'reaper');
+  fs.mkdirSync(reaperDir);
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', ROOT],
     cwd: ROOT,
-    env: { ...process.env, CREST_E2E: '1', CREST_USER_DATA: path.join(work, 'ud'), CREST_EXPORT_DIR: exportsDir, CREST_CHOOSE_DIR: batchDir, CREST_FFMPEG: FF },
+    env: { ...process.env, CREST_E2E: '1', CREST_USER_DATA: path.join(work, 'ud'), CREST_EXPORT_DIR: exportsDir, CREST_CHOOSE_DIR: batchDir, CREST_SAVE_DIR: saveDir, CREST_PICK_VIDEO: mp4, CREST_REAPER_DIR: reaperDir, CREST_FFMPEG: FF },
   });
   const page = await app.firstWindow();
   const problems = [];
@@ -446,6 +453,222 @@ ff(['-f', 'lavfi', '-i', 'sine=frequency=700:duration=2:sample_rate=44100', '-c:
       near(+m[1] * 3600 + +m[2] * 60 + +m[3], 6, 0.15, fmt + ' duration');
     }
     assert.ok(/\.flac$/.test(res.flac) && /\.mp3$/.test(res.mp3_v0) && /\.m4a$/.test(res.m4a));
+  });
+
+  const toolOpen = async (name) => {
+    await page.click('#toolsBtn');
+    await page.click(`#toolsPop [data-tool="${name}"]`);
+  };
+  const reopenFolder = () => page.evaluate(async (d) => { await window.__crest.handleResolved(await window.api.resolve(d)); }, media);
+  const probeOut = (f) => spawnSync(FF, ['-hide_banner', '-i', f], { encoding: 'utf8' }).stderr;
+
+  await step('tools menu lists the six tools', async () => {
+    await page.click('#toolsBtn');
+    assert.ok(await page.isVisible('#toolsPop'));
+    assert.strictEqual(await page.locator('#toolsPop [data-tool]').count(), 6);
+    await page.keyboard.press('Escape');
+    assert.ok(!(await page.isVisible('#toolsPop')));
+  });
+
+  await step('quality check: clipping, true peak, goniometer, marks on the waveform', async () => {
+    await open(clipped);
+    await waitAudio();
+    await toolOpen('qc');
+    assert.ok(await page.isVisible('#qcPop'));
+    await page.waitForFunction(() => /region/.test(document.getElementById('qcStats').textContent), null, { timeout: 8000 });
+    const txt = await page.textContent('#qcStats');
+    assert.ok(/Clipping/.test(txt) && /True peak/.test(txt) && /dBTP/.test(txt) && /correlation/i.test(txt), txt);
+    await page.check('#qcMarks');
+    await sleep(250);
+    await snap('13-qc');
+    await page.keyboard.press('Escape');
+    await open(toneWav);
+    await waitAudio();
+    await toolOpen('qc');
+    await page.waitForFunction(() => /none/.test(document.getElementById('qcStats').textContent), null, { timeout: 8000 });
+    await page.keyboard.press('Escape');
+  });
+
+  await step('loop maker: best end, seam, preview, WAV export with smpl loop points', async () => {
+    await open(toneWav);
+    await waitAudio();
+    await page.evaluate(() => window.__crest.setSel(0.3, 1.3));
+    await toolOpen('loop');
+    assert.ok(await page.isVisible('#loopPop'));
+    await page.click('#loopBest');
+    await page.waitForFunction(() => /match/.test(document.getElementById('loopScore').textContent), null, { timeout: 5000 });
+    const sel = await S('({ a: S.sel.start, b: S.sel.end })');
+    assert.ok(sel.b > 1.0 && sel.b <= 1.3 + 1e-6, 'end ' + sel.b);
+    assert.ok(parseInt(await page.textContent('#loopScore').then((s) => /(\d+)%/.exec(s)[1]), 10) >= 98);
+    await page.fill('#loopX', '50');
+    await page.dispatchEvent('#loopX', 'input');
+    await sleep(300);
+    await snap('14-loop');
+    await page.click('#loopPlay');
+    await sleep(250);
+    assert.ok(/Stop/.test(await page.textContent('#loopPlay')));
+    await page.click('#loopPlay');
+    assert.ok(/Preview/.test(await page.textContent('#loopPlay')));
+    await page.evaluate(() => { window.__crest.prefs.exFmt = 'wav24'; });
+    await page.click('#loopExport');
+    let out = null;
+    for (let i = 0; i < 80 && !out; i++) {
+      out = fs.readdirSync(saveDir).find((f) => /_loop.*\.wav$/.test(f));
+      if (!out) await sleep(100);
+    }
+    assert.ok(out, 'loop file written');
+    const buf = fs.readFileSync(path.join(saveDir, out));
+    const smpl = A.readSmplLoop(buf);
+    const dataBytes = buf.readUInt32LE(40);
+    const frames = dataBytes / 6;
+    assert.deepStrictEqual(smpl, { start: 0, end: frames - 1 });
+    const sr = 44100;
+    near(frames, (sel.b - sel.a) * sr - 0.05 * sr, 80, 'loop length = region - crossfade');
+    await page.keyboard.press('Escape');
+  });
+
+  await step('batch: whole folder to FLAC with peak normalisation', async () => {
+    await reopenFolder();
+    await page.waitForSelector('.row-file');
+    await toolOpen('batch');
+    assert.ok(await page.isVisible('#batchCard'));
+    await page.selectOption('#bNorm', 'peak');
+    await page.fill('#bTarget', '-3');
+    await page.selectOption('#bFmt', 'flac');
+    await page.fill('#bSuffix', '_proc');
+    await snap('15-batch');
+    await page.click('#bRun');
+    await page.waitForFunction(() => /Done:/.test(document.getElementById('bStatus').textContent), null, { timeout: 150000 });
+    const msg = await page.textContent('#bStatus');
+    assert.ok(/Done: 6 files written\./.test(msg), msg);
+    const outs = fs.readdirSync(batchDir).filter((f) => /_proc\.flac$/.test(f));
+    assert.strictEqual(outs.length, 6, outs.join(','));
+    const vd = spawnSync(FF, ['-hide_banner', '-i', path.join(batchDir, '01 hits_proc.flac'), '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+    near(parseFloat(/max_volume: (-?[\d.]+) dB/.exec(vd)[1]), -3, 0.35, 'normalised peak');
+    await page.keyboard.press('Escape');
+    assert.ok(!(await page.isVisible('#modal')));
+  });
+
+  await step('metadata: write tags into the file, reload, search the folder by tag', async () => {
+    page.on('dialog', (d) => d.accept());
+    await open(toneWav);
+    await waitAudio();
+    await page.keyboard.press('i');
+    await page.waitForSelector('#metaCard', { state: 'visible' });
+    await page.fill('#mTitle', 'Door Slam');
+    await page.fill('#mComment', 'Heavy wood door');
+    await page.fill('#mKeywords', 'door, wood');
+    await page.fill('#mGenre', 'DOORWood');
+    await page.fill('#mArtist', 'MG');
+    await page.fill('#mAlbum', 'GAME01');
+    await page.click('#mSave');
+    await page.waitForFunction(() => /saved/i.test(document.getElementById('metaNote').textContent), null, { timeout: 20000 });
+    const tags = M.parseTags(probeOut(toneWav));
+    assert.strictEqual(tags.title, 'Door Slam');
+    assert.strictEqual(tags.keywords, 'door, wood');
+    assert.strictEqual(tags.album, 'GAME01');
+    await waitAudio();
+    await page.click('#mFromName');
+    assert.ok(/UCS/.test(await page.textContent('#metaNote')));
+    await page.click('#mClose');
+    assert.ok(!(await page.isVisible('#modal')));
+    await reopenFolder();
+    await page.waitForSelector('.row-file');
+    await page.fill('#filter', 'heavy wood');
+    await page.waitForFunction(() => document.querySelectorAll('.row-file').length === 1, null, { timeout: 15000 });
+    assert.ok(/02 tone/.test(await page.textContent('.row-file')));
+    await page.fill('#filter', '');
+  });
+
+  await step('level match and A/B toggle between tabs keep position', async () => {
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.evaluate(() => { const c = window.__crest; for (const tb of c.tabs().slice()) c.closeTab(tb.id); });
+    await sleep(300);
+    await open(toneWav, { newTab: true });
+    await waitAudio();
+    await open(hitsWav, { newTab: true });
+    await waitAudio();
+    assert.ok(await page.isVisible('#abBtn'));
+    await page.keyboard.press('m');
+    await sleep(200);
+    const r = await page.evaluate(() => {
+      const c = window.__crest;
+      const ref = c.tabs()[0].lufs;
+      const m = c.S.meterAll;
+      return { ref, lufs: m.lufs, peak: m.peakDb, matchDb: c.S.matchDb };
+    });
+    console.log('   match debug', JSON.stringify(r), await S('S.file.name'));
+    const want = Math.min(r.ref - r.lufs, -r.peak);
+    near(r.matchDb, Math.max(-24, Math.min(12, want)), 0.06, 'match gain');
+    assert.ok(Math.abs(r.matchDb) > 0.5, 'tracks differ in loudness');
+    assert.ok(/dB match/.test(await page.textContent('#fx')));
+    await page.evaluate(() => { document.getElementById('media').currentTime = 1.5; });
+    await sleep(200);
+    await page.keyboard.press('\\');
+    await page.waitForFunction(() => window.__crest.S.file.name.startsWith('02'), null, { timeout: 15000 });
+    await waitAudio();
+    await page.waitForFunction(() => Math.abs(document.getElementById('media').currentTime - 1.5) < 0.1, null, { timeout: 8000 });
+    near(await S('S.matchDb'), 0, 0.01, 'reference tab is not changed');
+    await page.keyboard.press('m');
+    assert.strictEqual(await page.getAttribute('#matchBtn', 'aria-pressed'), 'false');
+  });
+
+  await step('picture audition: muted video follows the sound, offset, export with this sound', async () => {
+    await open(toneWav);
+    await waitAudio();
+    await toolOpen('pic');
+    assert.ok(await page.isVisible('#picPop'));
+    await page.click('#picChoose');
+    await page.waitForFunction(() => document.body.classList.contains('has-pic'), null, { timeout: 20000 });
+    console.log('   pic debug', JSON.stringify(await page.evaluate(() => { const v = document.getElementById('picVideo'); const o = document.getElementById('picOff'); return { dur: v.duration, rs: v.readyState, err: v.error && v.error.message, src: v.currentSrc, max: o.max, val: o.value, dis: o.disabled }; })));
+    await page.fill('#picOff', '1');
+    await page.dispatchEvent('#picOff', 'input');
+    await page.evaluate(() => { document.getElementById('media').currentTime = 0.5; });
+    await page.waitForFunction(() => {
+      const v = document.getElementById('picVideo');
+      return Math.abs(v.currentTime - 1.5) < 0.15;
+    }, null, { timeout: 8000 });
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => !document.getElementById('media').paused, null, { timeout: 5000 });
+    await sleep(900);
+    const d = await page.evaluate(() => {
+      const v = document.getElementById('picVideo');
+      const m = document.getElementById('media');
+      return { v: v.currentTime, m: m.currentTime, muted: v.muted, playing: !v.paused };
+    });
+    assert.ok(d.muted && d.playing, JSON.stringify(d));
+    near(d.v - d.m, 1, 0.3, 'picture is 1 s ahead of the sound clock');
+    await snap('16-picture');
+    await page.keyboard.press('Space');
+    await toolOpen('pic');
+    await page.click('#picExport');
+    let out = null;
+    for (let i = 0; i < 150 && !out; i++) {
+      out = fs.readdirSync(saveDir).find((f) => /_picture\.mp4$/.test(f));
+      if (!out) await sleep(200);
+    }
+    assert.ok(out, 'picture export written');
+    await sleep(500);
+    const info = M.parseProbe(probeOut(path.join(saveDir, out)));
+    assert.ok(info.video && info.audio, 'mux has picture and sound');
+    near(info.duration, 3, 0.25, 'duration = sound length');
+    await page.click('#picClear');
+    assert.ok(!(await page.evaluate(() => document.body.classList.contains('has-pic'))));
+    await page.keyboard.press('Escape');
+  });
+
+  await step('REAPER link: receiver script installed, file queued in the inbox', async () => {
+    await open(toneWav);
+    await waitAudio();
+    await toolOpen('reaper');
+    const inbox = path.join(reaperDir, 'crest_inbox.txt');
+    for (let i = 0; i < 80 && !fs.existsSync(inbox); i++) await sleep(100);
+    assert.ok(fs.existsSync(inbox), 'inbox written');
+    const queued = fs.readFileSync(inbox, 'utf8').trim().split(/\r?\n/).pop();
+    assert.ok(/\.wav$/.test(queued) && fs.existsSync(queued), queued);
+    const lua = fs.readFileSync(path.join(reaperDir, 'Scripts', 'Crest_receiver.lua'), 'utf8');
+    assert.ok(/InsertMedia/.test(lua) && /crest_inbox\.txt/.test(lua));
   });
 
   await step('language switch re-renders the UI in Spanish', async () => {
